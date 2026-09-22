@@ -468,6 +468,7 @@ export function ApiKeysMutateDrawer({
                           options={groups}
                           globalOptions={globalAutoGroupOptions}
                           maxCount={maxAutoGroups}
+                          showRatio={isAdmin}
                           onChange={(value) => {
                             form.setValue('auto_groups_mode', value.mode, {
                               shouldDirty: true,

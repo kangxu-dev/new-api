@@ -54,6 +54,7 @@ type AutoGroupOrderEditorProps = Omit<ComponentProps<'div'>, 'onChange'> & {
   options: ApiKeyGroupOption[]
   globalOptions: ApiKeyGroupOption[]
   maxCount: number
+  showRatio?: boolean
   onChange: (value: { groups: string[]; mode: 'inherit' | 'custom' }) => void
   'data-slot'?: string
   'data-form-root'?: string
@@ -232,6 +233,7 @@ export function AutoGroupOrderEditor(props: AutoGroupOrderEditorProps) {
         options={candidates}
         value={undefined}
         onValueChange={handleAdd}
+        showRatio={props.showRatio}
         placeholder={
           atLimit
             ? t('Maximum {{max}} groups selected', { max: maxCount })
@@ -294,7 +296,9 @@ export function AutoGroupOrderEditor(props: AutoGroupOrderEditorProps) {
                     {option.desc}
                   </span>
                 )}
-                <GroupRatioBadge ratio={option.ratio} />
+                {props.showRatio !== false && (
+                  <GroupRatioBadge ratio={option.ratio} />
+                )}
               </span>
             </li>
           ))}

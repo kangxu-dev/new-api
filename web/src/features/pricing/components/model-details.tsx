@@ -993,7 +993,7 @@ type GroupPricingSectionProps = {
   showRatio?: boolean
 }
 
-function GroupPricingSection(props: GroupPricingSectionProps) {
+export function GroupPricingSection(props: GroupPricingSectionProps) {
   const { t } = useTranslation()
   const variants = props.model.billing_plugin_variants
   if (!variants?.length) {

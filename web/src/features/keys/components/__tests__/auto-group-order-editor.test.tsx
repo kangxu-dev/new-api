@@ -93,7 +93,10 @@ function Harness(props: { initialGroups?: string[] }) {
   )
 }
 
-function InheritanceHarness(props: { globalOptions?: typeof globalOptions }) {
+function InheritanceHarness(props: {
+  globalOptions?: typeof globalOptions
+  showRatio?: boolean
+}) {
   const [groups, setGroups] = useState<string[]>([])
   const [mode, setMode] = useState<'inherit' | 'custom'>('inherit')
 
@@ -105,6 +108,7 @@ function InheritanceHarness(props: { globalOptions?: typeof globalOptions }) {
         options={[{ value: 'auto', label: 'auto' }, ...globalOptions]}
         globalOptions={props.globalOptions ?? globalOptions}
         maxCount={2}
+        showRatio={props.showRatio}
         onChange={(value) => {
           setGroups(value.groups)
           setMode(value.mode)
@@ -300,6 +304,17 @@ describe('Auto group order editor', () => {
     expect(
       within(container).getByRole('button', { name: 'Restore global Auto' })
     ).toBeDisabled()
+  })
+
+  test('hides inherited group ratios when ratio visibility is disabled', () => {
+    const { container } = render(<InheritanceHarness showRatio={false} />)
+
+    expect(container).not.toHaveTextContent('3x')
+    expect(container).not.toHaveTextContent('1x')
+    expect(container).not.toHaveTextContent('2x')
+    expect(
+      container.querySelector('[data-slot="global-auto-order"]')
+    ).toBeInTheDocument()
   })
 
   test('shows an explicit empty state when the global Auto order has no groups', () => {
