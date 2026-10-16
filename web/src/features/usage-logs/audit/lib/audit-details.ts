@@ -57,6 +57,14 @@ const TOKEN_AUDIT_OPERATIONS: Record<
     labelKey: 'View API token key',
     namedKey: 'View key for API token “{{name}}”',
   },
+  'token.usage_query': {
+    labelKey: 'Query API token usage',
+    namedKey: 'Query usage with API token “{{name}}”',
+  },
+  'token.logs_query': {
+    labelKey: 'Query API token usage logs',
+    namedKey: 'Query usage logs with API token “{{name}}”',
+  },
   'token.delete_batch': { labelKey: 'Batch delete API tokens' },
   'token.key_view_batch': { labelKey: 'View API token keys in batch' },
 }

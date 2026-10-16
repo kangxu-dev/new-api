@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -71,6 +72,28 @@ func TestRedisIPRateLimiterThresholdTTLAndNamespace(t *testing.T) {
 	assert.Equal(t, "3", count)
 	assert.Equal(t, 37*time.Second, redisServer.TTL(key))
 	assert.True(t, redisServer.Exists(legacyKey), "the v2 counter must not touch an old list key")
+}
+
+func TestRateLimitExemptIPBypassesIPRateLimiter(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	redisServer, _ := useRateLimitMiniRedis(t)
+
+	previousExemptIPs := rateLimitExemptIPs
+	rateLimitExemptIPs = map[netip.Addr]struct{}{
+		netip.MustParseAddr("192.0.2.70"): {},
+	}
+	t.Cleanup(func() { rateLimitExemptIPs = previousExemptIPs })
+
+	router := gin.New()
+	require.NoError(t, router.SetTrustedProxies(nil))
+	router.GET("/limited", rateLimitFactory(1, 30, "EXEMPT"), func(c *gin.Context) {
+		c.Status(http.StatusNoContent)
+	})
+
+	remoteAddr := "192.0.2.70:12345"
+	assert.Equal(t, http.StatusNoContent, performRateLimitRequest(router, "/limited", remoteAddr).Code)
+	assert.Equal(t, http.StatusNoContent, performRateLimitRequest(router, "/limited", remoteAddr).Code)
+	assert.False(t, redisServer.Exists(redisIPRateLimitKey("EXEMPT", "192.0.2.70")))
 }
 
 func TestRedisUserRateLimiterUsesSharedFixedWindow(t *testing.T) {

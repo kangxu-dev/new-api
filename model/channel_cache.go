@@ -120,9 +120,19 @@ func GetRandomSatisfiedChannel(
 	retry int,
 	filters []dto.ChannelFilter,
 ) (*Channel, error) {
+	return GetRandomSatisfiedChannelWithMultipliers(group, model, retry, filters, nil)
+}
+
+func GetRandomSatisfiedChannelWithMultipliers(
+	group string,
+	model string,
+	retry int,
+	filters []dto.ChannelFilter,
+	multipliers map[int]float64,
+) (*Channel, error) {
 	// if memory cache is disabled, get channel directly from database
 	if !common.MemoryCacheEnabled {
-		return GetChannel(group, model, retry, filters)
+		return GetChannelWithMultipliers(group, model, retry, filters, multipliers)
 	}
 
 	channelSyncLock.RLock()
@@ -183,6 +193,38 @@ func GetRandomSatisfiedChannel(
 
 	if len(targetChannels) == 0 {
 		return nil, errors.New(fmt.Sprintf("no channel found, group: %s, model: %s, priority: %d", group, model, targetPriority))
+	}
+
+	if len(multipliers) > 0 {
+		smoothingFactor := 1
+		smoothingAdjustment := 0
+		if sumWeight == 0 {
+			smoothingAdjustment = 100
+		} else if sumWeight/len(targetChannels) < 10 {
+			smoothingFactor = 100
+		}
+		totalWeight := 0.0
+		for _, channel := range targetChannels {
+			weight := channel.GetWeight()*smoothingFactor + smoothingAdjustment
+			multiplier := multipliers[channel.Id]
+			if multiplier <= 0 {
+				multiplier = 1
+			}
+			totalWeight += float64(weight) * multiplier
+		}
+		randomWeight := rand.Float64() * totalWeight
+		for _, channel := range targetChannels {
+			weight := channel.GetWeight()*smoothingFactor + smoothingAdjustment
+			multiplier := multipliers[channel.Id]
+			if multiplier <= 0 {
+				multiplier = 1
+			}
+			randomWeight -= float64(weight) * multiplier
+			if randomWeight < 0 {
+				return channel, nil
+			}
+		}
+		return targetChannels[len(targetChannels)-1], nil
 	}
 
 	// smoothing factor and adjustment

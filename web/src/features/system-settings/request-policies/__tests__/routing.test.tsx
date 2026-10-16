@@ -26,6 +26,9 @@ import { RoutingPolicySection } from '../routing-section'
 
 const options = {
   RetryTimes: '2',
+  'adaptive_channel_routing_setting.enabled': 'false',
+  'adaptive_channel_routing_setting.window_minutes': '30',
+  'adaptive_channel_routing_setting.min_samples': '10',
   'channel_affinity_setting.enabled': 'true',
   'channel_affinity_setting.session_mode': '',
   'channel_affinity_setting.switch_on_success': 'false',
@@ -148,6 +151,11 @@ it('opens global affinity settings and the complete rules table without switchin
     })
   ).toBeVisible()
   expect(
+    screen.getByRole('switch', {
+      name: 'Use adaptive scores for same-priority channels',
+    })
+  ).not.toBeChecked()
+  expect(
     screen.queryByRole('switch', { name: 'Switch affinity on success' })
   ).not.toBeInTheDocument()
   await userEvent.click(
@@ -177,6 +185,31 @@ it('opens global affinity settings and the complete rules table without switchin
   expect(
     screen.queryByRole('button', { name: 'Manage all session rules' })
   ).not.toBeInTheDocument()
+})
+it('enables adaptive scoring and saves its bounded window and sample threshold', async () => {
+  show()
+  const toggle = await screen.findByRole('switch', {
+    name: 'Use adaptive scores for same-priority channels',
+  })
+  await userEvent.click(toggle)
+  const windowInput = screen.getByRole('spinbutton', {
+    name: 'Scoring window (minutes)',
+  })
+  fireEvent.change(windowInput, { target: { value: '15' } })
+  const sampleInput = screen.getByRole('spinbutton', {
+    name: 'Minimum samples per channel',
+  })
+  fireEvent.change(sampleInput, { target: { value: '20' } })
+  await userEvent.click(screen.getByRole('button', { name: 'Save Changes' }))
+  await waitFor(() => expect(api.patch).toHaveBeenCalledTimes(1))
+  const payload = vi.mocked(api.patch).mock.calls[0][1] as {
+    options: Record<string, string>
+  }
+  expect(payload.options).toMatchObject({
+    'adaptive_channel_routing_setting.enabled': 'true',
+    'adaptive_channel_routing_setting.window_minutes': '15',
+    'adaptive_channel_routing_setting.min_samples': '20',
+  })
 })
 it('session rules sit between the session defaults and the retry budget', async () => {
   show()

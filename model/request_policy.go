@@ -41,6 +41,7 @@ func requestPolicyDefaultOptions() map[string]string {
 	defaults := make(map[string]string)
 	for prefix, value := range map[string]any{
 		"channel_affinity_setting.": operation_setting.GetChannelAffinitySetting(),
+		"adaptive_channel_routing_setting.": operation_setting.GetAdaptiveChannelRoutingSetting(),
 		"monitor_setting.":          operation_setting.GetMonitorSetting(),
 	} {
 		fields, err := config.ConfigToMap(value)
@@ -65,7 +66,7 @@ func requestPolicyDefaultOptions() map[string]string {
 }
 
 func IsRequestPolicyOption(key string) bool {
-	if strings.HasPrefix(key, "channel_affinity_setting.") {
+	if strings.HasPrefix(key, "channel_affinity_setting.") || strings.HasPrefix(key, "adaptive_channel_routing_setting.") {
 		return true
 	}
 	switch key {
@@ -99,6 +100,7 @@ func BuildRequestPolicy(options map[string]string) (*RequestPolicySnapshot, erro
 	maps.Copy(raw, options)
 	snapshot := &RequestPolicySnapshot{Options: raw}
 	affinityFields := map[string]string{}
+	adaptiveFields := map[string]string{}
 	for key, value := range raw {
 		if field, ok := strings.CutPrefix(key, "channel_affinity_setting."); ok {
 			switch field {
@@ -107,6 +109,14 @@ func BuildRequestPolicy(options map[string]string) (*RequestPolicySnapshot, erro
 				return nil, fmt.Errorf("unknown affinity option: %s", key)
 			}
 			affinityFields[field] = value
+		}
+		if field, ok := strings.CutPrefix(key, "adaptive_channel_routing_setting."); ok {
+			switch field {
+			case "enabled", "window_minutes", "min_samples":
+			default:
+				return nil, fmt.Errorf("unknown adaptive channel routing option: %s", key)
+			}
+			adaptiveFields[field] = value
 		}
 	}
 	// Decode through JSON so malformed scalar/array values cannot be silently ignored.
@@ -125,6 +135,29 @@ func BuildRequestPolicy(options map[string]string) (*RequestPolicySnapshot, erro
 	}
 	if err := common.Unmarshal(encoded, &snapshot.Affinity); err != nil {
 		return nil, err
+	}
+	adaptiveJSON := map[string]json.RawMessage{}
+	for key, value := range adaptiveFields {
+		if key == "enabled" {
+			encoded, _ := common.Marshal(value)
+			adaptiveJSON[key] = encoded
+		} else {
+			adaptiveJSON[key] = json.RawMessage(value)
+		}
+	}
+	encoded, err = common.Marshal(adaptiveJSON)
+	if err != nil {
+		return nil, err
+	}
+	var adaptiveSetting operation_setting.AdaptiveChannelRoutingSetting
+	if err := common.Unmarshal(encoded, &adaptiveSetting); err != nil {
+		return nil, err
+	}
+	if adaptiveSetting.WindowMinutes < 1 || adaptiveSetting.WindowMinutes > 60 {
+		return nil, fmt.Errorf("adaptive scoring window must be between 1 and 60 minutes")
+	}
+	if adaptiveSetting.MinSamples < 1 || adaptiveSetting.MinSamples > 10000 {
+		return nil, fmt.Errorf("adaptive scoring minimum samples must be between 1 and 10000")
 	}
 	snapshot.RetryTimes, err = strconv.Atoi(raw["RetryTimes"])
 	if err != nil || snapshot.RetryTimes < 0 || snapshot.RetryTimes == math.MaxInt {

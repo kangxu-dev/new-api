@@ -147,11 +147,12 @@ func CacheGetRandomSatisfiedChannel(param *RetryParam) (*model.Channel, string, 
 			}
 			logger.LogDebug(param.Ctx, "Auto selecting group: %s, priorityRetry: %d", autoGroup, priorityRetry)
 
-			channel, _ = model.GetRandomSatisfiedChannel(
+			channel, _ = model.GetRandomSatisfiedChannelWithMultipliers(
 				autoGroup,
 				param.ModelName,
 				priorityRetry,
 				filters,
+				AdaptiveChannelWeightMultipliers(autoGroup, param.ModelName),
 			)
 			if channel == nil {
 				// Current group has no available channel for this model, try next group
@@ -190,11 +191,12 @@ func CacheGetRandomSatisfiedChannel(param *RetryParam) (*model.Channel, string, 
 			break
 		}
 	} else {
-		channel, err = model.GetRandomSatisfiedChannel(
+		channel, err = model.GetRandomSatisfiedChannelWithMultipliers(
 			param.TokenGroup,
 			param.ModelName,
 			param.GetRetry(),
 			filters,
+			AdaptiveChannelWeightMultipliers(param.TokenGroup, param.ModelName),
 		)
 		if err != nil {
 			return nil, param.TokenGroup, err

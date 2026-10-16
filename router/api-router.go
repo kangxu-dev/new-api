@@ -290,7 +290,7 @@ func SetApiRouter(router *gin.Engine) {
 		usageRoute.Use(middleware.CORS(), middleware.CriticalRateLimit())
 		{
 			tokenUsageRoute := usageRoute.Group("/token")
-			tokenUsageRoute.Use(middleware.TokenAuthReadOnly())
+			tokenUsageRoute.Use(middleware.TokenAuthReadOnly(), middleware.TokenReadAudit())
 			{
 				tokenUsageRoute.GET("/", controller.GetTokenUsage)
 			}
@@ -345,7 +345,7 @@ func SetApiRouter(router *gin.Engine) {
 
 		logRoute.Use(middleware.CORS(), middleware.CriticalRateLimit())
 		{
-			logRoute.GET("/token", middleware.TokenAuthReadOnly(), controller.GetLogByKey)
+			logRoute.GET("/token", middleware.TokenAuthReadOnly(), middleware.TokenReadAudit(), controller.GetLogByKey)
 		}
 		groupRoute := apiRouter.Group("/group")
 		groupRoute.Use(middleware.AdminAuth())

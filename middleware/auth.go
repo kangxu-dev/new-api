@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"net"
@@ -352,9 +353,45 @@ func TokenAuthReadOnly() func(c *gin.Context) {
 		}
 
 		c.Set("id", token.UserId)
+		c.Set("username", userCache.Username)
+		c.Set("role", userCache.Role)
 		c.Set("token_id", token.Id)
+		c.Set("token_name", token.Name)
 		c.Set("token_key", token.Key)
 		c.Next()
+	}
+}
+
+// TokenReadAudit records successful API-token reads used by user-facing usage
+// pages. It stores token metadata, never the bearer key.
+func TokenReadAudit() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		action, content := "", ""
+		switch c.Request.Method + " " + c.FullPath() {
+		case "GET /api/usage/token/":
+			action, content = "token.usage_query", "Queried API token usage"
+		case "GET /api/log/token":
+			action, content = "token.logs_query", "Queried API token usage logs"
+		default:
+			c.Next()
+			return
+		}
+
+		writer := &auditResponseWriter{ResponseWriter: c.Writer, body: bytes.NewBuffer(nil), maxSize: 64 * 1024}
+		c.Writer = writer
+		c.Next()
+
+		status := writer.Status()
+		params := model.AuditFields{
+			"id":   c.GetInt("token_id"),
+			"name": c.GetString("token_name"),
+		}
+		model.RecordAuditLog(c, model.AuditLog{
+			UserId: c.GetInt("id"), Username: c.GetString("username"), ActorRole: c.GetInt("role"),
+			Category: model.AuditCategoryOperation, Action: action, Content: content,
+			Status: status, Success: auditResponseSuccess(status, writer.body.Bytes()),
+			Other: model.AuditOther{Op: &model.AuditOperation{Action: action, Params: params}},
+		})
 	}
 }
 

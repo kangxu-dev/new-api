@@ -111,6 +111,16 @@ func GetChannel(
 	retry int,
 	filters []dto.ChannelFilter,
 ) (*Channel, error) {
+	return GetChannelWithMultipliers(group, model, retry, filters, nil)
+}
+
+func GetChannelWithMultipliers(
+	group string,
+	model string,
+	retry int,
+	filters []dto.ChannelFilter,
+	multipliers map[int]float64,
+) (*Channel, error) {
 	var abilities []Ability
 	err := DB.Where(commonGroupCol+" = ? and model = ? and enabled = ?", group, model, true).Order("priority DESC, weight DESC").Find(&abilities).Error
 	if err != nil {
@@ -141,19 +151,40 @@ func GetChannel(
 	}
 	channel := Channel{}
 	if len(abilities) > 0 {
-		// Randomly choose one
-		weightSum := uint(0)
-		for _, ability_ := range abilities {
-			weightSum += ability_.Weight + 10
-		}
-		// Randomly choose one
-		weight := common.GetRandomInt(int(weightSum))
-		for _, ability_ := range abilities {
-			weight -= int(ability_.Weight) + 10
-			//log.Printf("weight: %d, ability weight: %d", weight, *ability_.Weight)
-			if weight <= 0 {
-				channel.Id = ability_.ChannelId
-				break
+		if len(multipliers) > 0 {
+			totalWeight := 0.0
+			for _, ability := range abilities {
+				multiplier := multipliers[ability.ChannelId]
+				if multiplier <= 0 {
+					multiplier = 1
+				}
+				totalWeight += float64(ability.Weight+10) * multiplier
+			}
+			randomWeight := float64(common.GetRandomInt(1_000_000)) / 1_000_000 * totalWeight
+			for _, ability := range abilities {
+				multiplier := multipliers[ability.ChannelId]
+				if multiplier <= 0 {
+					multiplier = 1
+				}
+				randomWeight -= float64(ability.Weight+10) * multiplier
+				if randomWeight < 0 {
+					channel.Id = ability.ChannelId
+					break
+				}
+			}
+		} else {
+			// Randomly choose one
+			weightSum := uint(0)
+			for _, ability_ := range abilities {
+				weightSum += ability_.Weight + 10
+			}
+			weight := common.GetRandomInt(int(weightSum))
+			for _, ability_ := range abilities {
+				weight -= int(ability_.Weight) + 10
+				if weight <= 0 {
+					channel.Id = ability_.ChannelId
+					break
+				}
 			}
 		}
 	} else {

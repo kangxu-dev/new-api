@@ -5,7 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/netip"
+	"os"
 	"strconv"
+	"strings"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/logger"
@@ -36,6 +39,28 @@ return {1, count, ttl}
 `
 
 var inMemoryRateLimiter common.InMemoryRateLimiter
+
+var rateLimitExemptIPs = parseRateLimitExemptIPs(os.Getenv("RATE_LIMIT_EXEMPT_IPS"))
+
+func parseRateLimitExemptIPs(raw string) map[netip.Addr]struct{} {
+	ips := make(map[netip.Addr]struct{})
+	for _, item := range strings.Split(raw, ",") {
+		ip, err := netip.ParseAddr(strings.TrimSpace(item))
+		if err == nil {
+			ips[ip.Unmap()] = struct{}{}
+		}
+	}
+	return ips
+}
+
+func isRateLimitExemptIP(clientIP string) bool {
+	ip, err := netip.ParseAddr(clientIP)
+	if err != nil {
+		return false
+	}
+	_, ok := rateLimitExemptIPs[ip.Unmap()]
+	return ok
+}
 
 var defNext = func(c *gin.Context) {
 	c.Next()
@@ -147,12 +172,20 @@ func writeRateLimited(c *gin.Context, retryAfterSeconds int64) {
 func rateLimitFactory(maxRequestNum int, duration int64, mark string) func(c *gin.Context) {
 	if common.RedisEnabled {
 		return func(c *gin.Context) {
+			if isRateLimitExemptIP(c.ClientIP()) {
+				c.Next()
+				return
+			}
 			redisRateLimiter(c, maxRequestNum, duration, mark)
 		}
 	}
 	// It's safe to call multi times.
 	inMemoryRateLimiter.Init(common.RateLimitKeyExpirationDuration)
 	return func(c *gin.Context) {
+		if isRateLimitExemptIP(c.ClientIP()) {
+			c.Next()
+			return
+		}
 		memoryRateLimiter(c, maxRequestNum, duration, mark)
 	}
 }

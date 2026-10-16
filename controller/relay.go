@@ -196,6 +196,15 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		}
 
 		if newAPIError == nil {
+			firstByteMs := int64(0)
+			hasFirstByte := relayInfo.HasSendResponse()
+			if hasFirstByte {
+				firstByteMs = relayInfo.FirstResponseTime.Sub(relayInfo.StartTime).Milliseconds()
+			}
+			adaptiveSuccess := relayInfo.StreamStatus == nil || relayInfo.StreamStatus.IsNormalEnd() && !relayInfo.StreamStatus.HasErrors() && (relayInfo.StreamStatus.ResponseOutcome() == "" || relayInfo.StreamStatus.ResponseOutcome() == "completed")
+			if adaptiveSuccess {
+				service.RecordAdaptiveChannelOutcome(relayInfo.UsingGroup, relayInfo.OriginModelName, channel.Id, http.StatusOK, true, firstByteMs, hasFirstByte)
+			}
 			service.MarkRequestPolicySuccess(c, relayInfo.StreamStatus)
 			relayInfo.LastError = nil
 			return

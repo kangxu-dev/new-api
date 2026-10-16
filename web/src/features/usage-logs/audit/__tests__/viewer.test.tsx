@@ -97,6 +97,18 @@ it.each([
   ],
   ['token.create', { id: 11, name: '1' }, 'Create API token “1”', ''],
   [
+    'token.usage_query',
+    { id: 11, name: 'usage-key' },
+    'Query usage with API token “usage-key”',
+    '',
+  ],
+  [
+    'token.logs_query',
+    { id: 11, name: 'usage-key' },
+    'Query usage logs with API token “usage-key”',
+    '',
+  ],
+  [
     'token.update',
     {
       id: 11,

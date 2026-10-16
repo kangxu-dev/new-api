@@ -3,6 +3,7 @@ package middleware
 import (
 	"crypto/hmac"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -106,6 +107,41 @@ func TestUserAuthAllowsOpaqueDottedPAT(t *testing.T) {
 	}
 	require.NoError(t, common.Unmarshal(response.Body.Bytes(), &body))
 	assert.Equal(t, user.Id, body.ID)
+}
+
+func TestTokenReadAuditRecordsTokenNameWithoutBearerKey(t *testing.T) {
+	setupDashboardAuthMiddlewareTest(t)
+	gin.SetMode(gin.TestMode)
+	require.NoError(t, model.DB.AutoMigrate(&model.Token{}))
+	user := createMiddlewarePATUser(t, "usage-reader", "dashboard-pat")
+	token := &model.Token{UserId: user.Id, Key: "readkey123", Name: "C 端查询专用", Status: common.TokenStatusEnabled}
+	require.NoError(t, model.DB.Create(token).Error)
+
+	router := gin.New()
+	router.GET("/api/log/token", TokenAuthReadOnly(), TokenReadAudit(), func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"success": true, "data": []any{}})
+	})
+	request := httptest.NewRequest(http.MethodGet, "/api/log/token", nil)
+	request.Header.Set("Authorization", "Bearer sk-readkey123")
+	request.Header.Set("User-Agent", "usage-page-test")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+
+	assert.Equal(t, http.StatusOK, response.Code)
+	var entry model.AuditLog
+	require.NoError(t, model.LOG_DB.Where("action = ?", "token.logs_query").First(&entry).Error)
+	assert.Equal(t, user.Id, entry.UserId)
+	assert.Equal(t, "usage-reader", entry.Username)
+	assert.Equal(t, "/api/log/token", entry.Route)
+	assert.Equal(t, "usage-page-test", entry.UserAgent)
+	assert.True(t, entry.Success)
+	require.NotNil(t, entry.Other.Op)
+	assert.Equal(t, json.RawMessage(fmt.Sprintf("%d", token.Id)), entry.Other.Op.Params["id"])
+	nameJSON, err := json.Marshal(token.Name)
+	require.NoError(t, err)
+	assert.Equal(t, json.RawMessage(nameJSON), entry.Other.Op.Params["name"])
+	assert.NotContains(t, entry.Content, "readkey123")
+	assert.NotContains(t, entry.Other.Op.Params, "key")
 }
 
 func TestUserAuthNeverFallsBackForRecognizedInvalidInternalJWT(t *testing.T) {

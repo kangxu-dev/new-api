@@ -12,6 +12,11 @@ export function createRoutingPolicySchema(t: TFunction) {
         (value) => parseHttpStatusCodeRules(value).ok,
         t('Invalid status code rules')
       ),
+    adaptive_channel_routing_setting: z.object({
+      enabled: z.boolean(),
+      window_minutes: z.number().int().min(1).max(60),
+      min_samples: z.number().int().min(1).max(10000),
+    }),
     channel_affinity_setting: z.object({
       enabled: z.boolean(),
       session_mode: z.enum(['', 'off', 'prefer', 'strict']),
@@ -49,6 +54,16 @@ export function routingPolicyFormValues(
   return {
     RetryTimes: Number(options.RetryTimes),
     AutomaticRetryStatusCodes: options.AutomaticRetryStatusCodes,
+    adaptive_channel_routing_setting: {
+      enabled:
+        options['adaptive_channel_routing_setting.enabled'] === 'true',
+      window_minutes: Number(
+        options['adaptive_channel_routing_setting.window_minutes'] || 30
+      ),
+      min_samples: Number(
+        options['adaptive_channel_routing_setting.min_samples'] || 10
+      ),
+    },
     channel_affinity_setting: {
       enabled: options['channel_affinity_setting.enabled'] === 'true',
       session_mode: (options['channel_affinity_setting.session_mode'] ||
@@ -72,6 +87,11 @@ export function routingPolicyOptions(
   return {
     RetryTimes: String(values.RetryTimes),
     AutomaticRetryStatusCodes: values.AutomaticRetryStatusCodes,
+    ...Object.fromEntries(
+      Object.entries(values.adaptive_channel_routing_setting).map(
+        ([key, value]) => [`adaptive_channel_routing_setting.${key}`, String(value)]
+      )
+    ),
     ...Object.fromEntries(
       Object.entries(values.channel_affinity_setting).map(([key, value]) => [
         `channel_affinity_setting.${key}`,
