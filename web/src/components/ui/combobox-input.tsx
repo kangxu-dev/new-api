@@ -134,14 +134,15 @@ export function ComboboxInput({
     }
     const input = inputRef.current
     if (!input) return
-    const container =
-      input.closest<HTMLElement>('[role="dialog"]') ?? document.body
+    const dialog = input.closest<HTMLElement>('[role="dialog"]')
+    const container = dialog ?? document.body
     const measure = () => {
       const rect = input.getBoundingClientRect()
+      const containerRect = dialog?.getBoundingClientRect()
       setDropdown({
         container,
-        top: rect.bottom + 4,
-        left: rect.left,
+        top: rect.bottom + 4 - (containerRect?.top ?? 0),
+        left: rect.left - (containerRect?.left ?? 0),
         width: rect.width,
       })
     }
