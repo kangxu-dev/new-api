@@ -244,14 +244,15 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 
 			// 瞬时错误先在同一渠道原地重试，不占用换渠道预算；退避等待期间
 			// context 取消则直接终止。
+			//
+			// 这里不能重新执行 SetupContextForSelectedChannel：渠道没变，上下文
+			// 仍然正确，而首次尝试拿到的 channel 是 distributor 传下来的精简对象
+			// （只有 Id/Type/Name/AutoBan），用它重设会把 base URL 和 key 覆盖成
+			// 空值，下一次请求就会以 "unsupported protocol scheme" 失败。每轮状态
+			// 由 handler 顶部的 InitChannelMeta 从现有上下文重建。
 			if decision.Action == "retry_same_channel" {
 				service.MarkSameChannelRetry(c)
 				if !service.SleepWithContext(c.Request.Context(), operation_setting.SameChannelRetryBackoff(service.SameChannelRetryCount(c))) {
-					stopRetry = true
-					break
-				}
-				if setupErr := middleware.SetupContextForSelectedChannel(c, channel, relayInfo.OriginModelName); setupErr != nil {
-					newAPIError = setupErr
 					stopRetry = true
 					break
 				}
