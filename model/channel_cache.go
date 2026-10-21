@@ -120,7 +120,7 @@ func GetRandomSatisfiedChannel(
 	retry int,
 	filters []dto.ChannelFilter,
 ) (*Channel, error) {
-	return GetRandomSatisfiedChannelWithMultipliers(group, model, retry, filters, nil)
+	return GetRandomSatisfiedChannelWithMultipliers(group, model, retry, filters, nil, nil)
 }
 
 func GetRandomSatisfiedChannelWithMultipliers(
@@ -129,23 +129,35 @@ func GetRandomSatisfiedChannelWithMultipliers(
 	retry int,
 	filters []dto.ChannelFilter,
 	multipliers map[int]float64,
+	excluded map[int]struct{},
 ) (*Channel, error) {
 	// if memory cache is disabled, get channel directly from database
 	if !common.MemoryCacheEnabled {
-		return GetChannelWithMultipliers(group, model, retry, filters, multipliers)
+		return GetChannelWithMultipliers(group, model, retry, filters, multipliers, excluded)
 	}
 
 	channelSyncLock.RLock()
 	defer channelSyncLock.RUnlock()
 
 	// First, try to find channels with the exact model name.
-	channels, _ := filterCandidateIDs(group2model2channels[group][model], model, filters)
+	candidates, _ := filterCandidateIDs(group2model2channels[group][model], model, filters)
 
 	// If no channels found, try to find channels with the normalized model name.
-	if len(channels) == 0 {
+	if len(candidates) == 0 {
 		normalizedModel := ratio_setting.RoutingMatchModelName(model)
-		channels, _ = filterCandidateIDs(group2model2channels[group][normalizedModel], model, filters)
+		candidates, _ = filterCandidateIDs(group2model2channels[group][normalizedModel], model, filters)
 	}
+
+	// Channels that already failed in this request are dropped before the
+	// single-candidate shortcut, otherwise a retry would re-select them.
+	channels := excludeCandidateIDs(candidates, excluded)
+	if len(channels) == 0 {
+		// Every candidate already failed. Reusing one beats failing outright,
+		// and keeps a single-channel group retrying the way it did before
+		// exclusion existed.
+		channels = candidates
+	}
+	channels = excludeCooledDownChannels(channels, model)
 
 	if len(channels) == 0 {
 		return nil, nil

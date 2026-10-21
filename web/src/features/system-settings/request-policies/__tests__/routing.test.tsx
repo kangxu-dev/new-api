@@ -828,3 +828,75 @@ it.each([
     expect(api.patch).not.toHaveBeenCalled()
   }
 )
+it('leaves the failover section untouched when options predate it', async () => {
+  show()
+  await screen.findByRole('switch', {
+    name: 'Never retry on a channel that already failed',
+  })
+  expect(
+    screen.getByRole('switch', {
+      name: 'Never retry on a channel that already failed',
+    })
+  ).toBeChecked()
+  expect(
+    screen.getByRole('switch', {
+      name: 'Stop retrying once the response has started',
+    })
+  ).toBeChecked()
+  expect(
+    screen.getByRole('spinbutton', {
+      name: 'Same-channel retries before switching',
+    })
+  ).toHaveValue(0)
+  expect(
+    screen.getByRole('spinbutton', { name: 'Cooldown duration (seconds)' })
+  ).toHaveValue(0)
+
+  await userEvent.click(screen.getByRole('button', { name: 'Save Changes' }))
+
+  expect(api.patch).not.toHaveBeenCalled()
+})
+it('saves same-channel retry settings only after they are enabled', async () => {
+  show()
+  const retries = await screen.findByRole('spinbutton', {
+    name: 'Same-channel retries before switching',
+  })
+  expect(
+    screen.queryByRole('spinbutton', { name: 'Retry backoff (ms)' })
+  ).not.toBeInTheDocument()
+
+  fireEvent.change(retries, { target: { value: '2' } })
+  const backoff = screen.getByRole('spinbutton', { name: 'Retry backoff (ms)' })
+  fireEvent.change(backoff, { target: { value: '750' } })
+  await userEvent.click(screen.getByRole('button', { name: 'Save Changes' }))
+
+  await waitFor(() => expect(api.patch).toHaveBeenCalledTimes(1))
+  const payload = vi.mocked(api.patch).mock.calls[0][1] as {
+    options: Record<string, string>
+  }
+  expect(payload.options).toEqual({
+    'retry_failover_setting.same_channel_retries': '2',
+    'retry_failover_setting.backoff_ms': '750',
+  })
+})
+it('explains that a cooldown replaces permanent disabling only inside its status range', async () => {
+  show()
+  const cooldown = await screen.findByRole('spinbutton', {
+    name: 'Cooldown duration (seconds)',
+  })
+  const codes = screen.getByRole('textbox', {
+    name: 'Cooldown status codes',
+  })
+  expect(codes).toBeDisabled()
+
+  fireEvent.change(cooldown, { target: { value: '60' } })
+
+  expect(
+    screen.getByRole('textbox', { name: 'Cooldown status codes' })
+  ).toBeEnabled()
+  expect(
+    screen.getByText(
+      'While a cooldown is active, these status codes no longer disable the channel permanently. Codes outside this range keep the existing automatic-disable behavior.'
+    )
+  ).toBeVisible()
+})

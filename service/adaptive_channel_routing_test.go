@@ -78,5 +78,19 @@ func TestAdaptiveChannelScorePenalizesServerErrorsAndSlowFirstByte(t *testing.T)
 	strong := adaptiveChannelScore(20, 20, 0, 1000, 20)
 	weak := adaptiveChannelScore(20, 10, 10, 100000, 20)
 	assert.Greater(t, strong, weak)
-	assert.InDelta(t, 1.5, 0.5+strong/100, 0.001)
+
+	// A flawless channel with no measurable first byte reaches the top of the
+	// band; the multiplier is 0.5 + score/100, so the band is [0.5, 1.5].
+	perfect := adaptiveChannelScore(20, 20, 0, 0, 20)
+	assert.InDelta(t, 1.5, 0.5+perfect/100, 0.001)
+
+	// 50ms average first byte over 20 samples is good but not flawless: the
+	// first-byte term is 100/(1+50/2000) = 97.56, so the blended score is
+	// 0.8*100 + 0.2*97.56 and the multiplier lands just below the cap.
+	assert.InDelta(t, 1.4951, 0.5+strong/100, 0.0001)
+
+	for _, score := range []float64{strong, weak, perfect} {
+		assert.GreaterOrEqual(t, score, 0.0)
+		assert.LessOrEqual(t, score, 100.0)
+	}
 }

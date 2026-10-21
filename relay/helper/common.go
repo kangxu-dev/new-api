@@ -119,6 +119,7 @@ func PingData(c *gin.Context) error {
 	if _, err := c.Writer.Write([]byte(": PING\n\n")); err != nil {
 		return fmt.Errorf("write ping data failed: %w", err)
 	}
+	common.AddStreamHeartbeatBytes(c, len(": PING\n\n"))
 	return FlushWriter(c)
 }
 

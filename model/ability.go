@@ -9,6 +9,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/dto"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
 
 	"github.com/samber/lo"
 	"gorm.io/gorm"
@@ -111,7 +112,7 @@ func GetChannel(
 	retry int,
 	filters []dto.ChannelFilter,
 ) (*Channel, error) {
-	return GetChannelWithMultipliers(group, model, retry, filters, nil)
+	return GetChannelWithMultipliers(group, model, retry, filters, nil, nil)
 }
 
 func GetChannelWithMultipliers(
@@ -120,6 +121,7 @@ func GetChannelWithMultipliers(
 	retry int,
 	filters []dto.ChannelFilter,
 	multipliers map[int]float64,
+	excluded map[int]struct{},
 ) (*Channel, error) {
 	var abilities []Ability
 	err := DB.Where(commonGroupCol+" = ? and model = ? and enabled = ?", group, model, true).Order("priority DESC, weight DESC").Find(&abilities).Error
@@ -127,6 +129,23 @@ func GetChannelWithMultipliers(
 		return nil, err
 	}
 	abilities = filterAbilitiesByConstraints(abilities, model, filters)
+	if len(excluded) > 0 {
+		remaining := lo.Filter(abilities, func(ability Ability, _ int) bool {
+			_, skip := excluded[ability.ChannelId]
+			return !skip
+		})
+		// Every candidate already failed in this request. Reusing one beats
+		// failing outright, and keeps a single-channel group retrying the way
+		// it did before exclusion existed.
+		if len(remaining) > 0 {
+			abilities = remaining
+		}
+	}
+	if operation_setting.GetRetryFailoverSetting().CooldownSeconds > 0 {
+		abilities = lo.Filter(abilities, func(ability Ability, _ int) bool {
+			return !ChannelInCooldown(ability.ChannelId, model)
+		})
+	}
 	if len(abilities) > 0 {
 		priorities := make([]int64, 0)
 		seen := make(map[int64]bool)

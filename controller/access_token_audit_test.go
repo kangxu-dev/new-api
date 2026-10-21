@@ -432,15 +432,54 @@ type releasedAuditLog struct {
 
 func (releasedAuditLog) TableName() string { return "logs" }
 
+// openIsolatedSQLite opens a SQLite database in a fresh temp directory and
+// closes it before the directory is removed.
+//
+// concurrentWriters selects the production DSN documented on common.SQLitePath
+// (busy timeout, WAL, BEGIN IMMEDIATE), which makes concurrent writers queue
+// instead of failing instantly with SQLITE_BUSY. It is opt-in because BEGIN
+// IMMEDIATE takes the write lock before the transaction reads, so a test that
+// needs two transactions to hold read snapshots at the same time would
+// deadlock on it.
+func openIsolatedSQLite(t *testing.T, concurrentWriters bool) (*gorm.DB, string) {
+	t.Helper()
+	dsn := t.TempDir() + "/audit.db"
+	if concurrentWriters {
+		dsn += "?_pragma=busy_timeout(30000)&_pragma=journal_mode(WAL)&_txlock=immediate"
+	}
+	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
+	require.NoError(t, err)
+	// Cleanups run LIFO, so this closes the handle before the t.TempDir cleanup
+	// tries to remove the directory. Windows refuses to delete a file that
+	// still has an open handle, which turned every SQLite case into a teardown
+	// failure even when its assertions passed.
+	t.Cleanup(func() {
+		connection, err := db.DB()
+		if err == nil {
+			_ = connection.Close()
+		}
+	})
+	return db, dsn
+}
+
+// newConcurrentAuditTestDatabase is newAuditTestDatabase for suites that run
+// concurrent writers, which SQLite only handles with the production pragmas.
+func newConcurrentAuditTestDatabase(t *testing.T, kind, dsn string) *gorm.DB {
+	t.Helper()
+	if kind == "sqlite" {
+		db, _ := openIsolatedSQLite(t, true)
+		return db
+	}
+	db, _ := newAuditTestDatabase(t, kind, dsn)
+	return db
+}
+
 // External tests create a new database per case on a loopback-only disposable
 // instance. They never drop databases or tables supplied through an environment variable.
 func newAuditTestDatabase(t *testing.T, kind, dsn string) (*gorm.DB, string) {
 	t.Helper()
 	if kind == "sqlite" {
-		path := t.TempDir() + "/audit.db"
-		db, err := gorm.Open(sqlite.Open(path), &gorm.Config{})
-		require.NoError(t, err)
-		return db, path
+		return openIsolatedSQLite(t, false)
 	}
 	require.NotEmpty(t, dsn)
 	name := fmt.Sprintf("newapi_audit_%d", time.Now().UnixNano())
@@ -492,6 +531,25 @@ func newAuditTestDatabase(t *testing.T, kind, dsn string) (*gorm.DB, string) {
 		}
 	})
 	return db, newDSN
+}
+
+// closeModelDatabaseHandles closes the connections model.InitDB / InitLogDB
+// just opened. They point at the isolated database file, and Windows refuses to
+// remove a t.TempDir while a handle is still open. Call it immediately after
+// those calls so it captures exactly the handles they produced.
+func closeModelDatabaseHandles(t *testing.T) {
+	t.Helper()
+	mainHandle, logHandle := model.DB, model.LOG_DB
+	t.Cleanup(func() {
+		for _, handle := range []*gorm.DB{mainHandle, logHandle} {
+			if handle == nil {
+				continue
+			}
+			if connection, err := handle.DB(); err == nil {
+				_ = connection.Close()
+			}
+		}
+	})
 }
 
 func verifyAuditRoleStorage(t *testing.T) {
@@ -683,6 +741,10 @@ func TestAuditDatabaseMatrix(t *testing.T) {
 					for range 2 {
 						require.NoError(t, model.InitDB())
 						require.NoError(t, model.InitLogDB())
+						// Each call opens a fresh handle on the isolated file,
+						// so every generation has to be closed, not just the
+						// last one model.DB points at.
+						closeModelDatabaseHandles(t)
 					}
 					if !upgrade {
 						require.NoError(t, db.Create(&model.User{Username: "fresh-owner", Password: "placeholder", AffCode: "fresh-aff"}).Error)
@@ -782,7 +844,9 @@ func TestIndependentAuditLogStores(t *testing.T) {
 				t.Setenv("LOG_SQL_DSN", isolatedDSN)
 				t.Setenv("LOG_SQL_CLICKHOUSE_TTL_DAYS", "7")
 				require.NoError(t, model.InitLogDB())
+				closeModelDatabaseHandles(t)
 				require.NoError(t, model.InitLogDB())
+				closeModelDatabaseHandles(t)
 				if upgrade {
 					var old model.Log
 					require.NoError(t, model.LOG_DB.Where("request_id = ?", "legacy-split-request").Take(&old).Error)

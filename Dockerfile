@@ -25,6 +25,11 @@ ARG TARGETARCH
 ENV GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64}
 ENV GOEXPERIMENT=greenteagc
 
+# Overridable so a build behind a module mirror (or an air-gapped network) does
+# not have to reach proxy.golang.org. The default keeps the previous behavior.
+ARG GOPROXY=https://proxy.golang.org,direct
+ENV GOPROXY=${GOPROXY}
+
 WORKDIR /build
 
 ADD go.mod go.sum ./

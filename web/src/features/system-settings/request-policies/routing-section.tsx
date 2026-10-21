@@ -89,9 +89,12 @@ function RoutingPolicyEditor(props: { config: PolicyConfig }) {
     next.AutomaticRetryStatusCodes = parseHttpStatusCodeRules(
       next.AutomaticRetryStatusCodes
     ).normalized
+    // Options the backend has not returned yet fall back to the form's own
+    // defaults, so a form left untouched still produces an empty delta.
+    const previousOptions = routingPolicyOptions(defaults)
     const delta = Object.fromEntries(
       Object.entries(next).filter(([key, value]) => {
-        const previous = props.config.options[key]
+        const previous = props.config.options[key] ?? previousOptions[key]
         if (key === 'channel_affinity_setting.rules') {
           return (
             JSON.stringify(JSON.parse(value)) !==

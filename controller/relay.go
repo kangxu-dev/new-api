@@ -91,16 +91,21 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			service.RecordRequestPolicyTermination(c, newAPIError)
 			logger.LogError(c, fmt.Sprintf("relay error: %s", common.LocalLogPreview(newAPIError.Error())))
 			newAPIError.SetMessage(common.MessageWithRequestId(newAPIError.Error(), requestId))
+			statusCode := newAPIError.StatusCode
+			// 客户端已断开且响应尚未提交：没有人接收这个响应，标 499 供访问日志归类。
+			if c.Request != nil && c.Request.Context().Err() != nil && !c.Writer.Written() {
+				statusCode = statusClientClosedRequest
+			}
 			switch relayFormat {
 			case types.RelayFormatOpenAIRealtime:
 				helper.WssError(c, ws, newAPIError.ToOpenAIError())
 			case types.RelayFormatClaude:
-				c.JSON(newAPIError.StatusCode, gin.H{
+				c.JSON(statusCode, gin.H{
 					"type":  "error",
 					"error": newAPIError.ToClaudeError(),
 				})
 			default:
-				c.JSON(newAPIError.StatusCode, gin.H{
+				c.JSON(statusCode, gin.H{
 					"error": newAPIError.ToOpenAIError(),
 				})
 			}
@@ -152,21 +157,33 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		RequestPath: c.Request.URL.Path,
 		Retry:       common.GetPointer(0),
 	}
+	retryFailover := operation_setting.GetRetryFailoverSetting()
+	if retryFailover.ExcludeFailedChannels {
+		retryParam.EnableExclusion()
+	}
 	relayInfo.RetryIndex = 0
 	relayInfo.LastError = nil
+	lastStatusCode := 0
 
 	for ; retryParam.GetRetry() <= common.RetryTimes; retryParam.IncreaseRetry() {
-		relayInfo.StreamStatus = nil
-		relayInfo.PerformanceBusinessRejection = false
-		relayInfo.PerformanceOutputTokens = 0
 		relayInfo.RetryIndex = retryParam.GetRetry()
-		channel, channelErr := getChannel(c, relayInfo, retryParam)
+		channel, channelErr, noAvailableChannel := getChannel(c, relayInfo, retryParam)
 		if channelErr != nil {
+			// 候选池被排除集清空且上游刚返回 503：退避后清空排除集重选，
+			// 而不是立刻把「无可用渠道」返回给客户端。
+			if noAvailableChannel &&
+				lastStatusCode == http.StatusServiceUnavailable &&
+				retryParam.GetRetry() < common.RetryTimes &&
+				service.SleepWithContext(c.Request.Context(), time.Duration(retryFailover.SelectionExhaustedBackoffMs)*time.Millisecond) {
+				retryParam.ClearTried()
+				continue
+			}
 			logger.LogError(c, channelErr.Error())
 			newAPIError = channelErr
 			break
 		}
 		service.AppendUsedChannel(c, channel.Id)
+		retryParam.MarkTried(channel.Id)
 		if billingErr := service.PrepareTieredBillingForSelectedGroup(c, relayInfo); billingErr != nil {
 			newAPIError = billingErr
 			break
@@ -182,42 +199,70 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			}
 			break
 		}
-		c.Request.Body = io.NopCloser(bodyStorage)
 
-		switch relayFormat {
-		case types.RelayFormatOpenAIRealtime:
-			newAPIError = relay.WssHelper(c, relayInfo)
-		case types.RelayFormatClaude:
-			newAPIError = relay.ClaudeHelper(c, relayInfo)
-		case types.RelayFormatGemini:
-			newAPIError = geminiRelayHandler(c, relayInfo)
-		default:
-			newAPIError = relayHandler(c, relayInfo)
-		}
+		stopRetry := false
+		// 每个渠道有自己的同渠道重试预算，换渠道时重置。
+		service.ResetSameChannelRetry(c)
+		for {
+			relayInfo.StreamStatus = nil
+			relayInfo.PerformanceBusinessRejection = false
+			relayInfo.PerformanceOutputTokens = 0
+			c.Request.Body = io.NopCloser(bodyStorage)
 
-		if newAPIError == nil {
-			firstByteMs := int64(0)
-			hasFirstByte := relayInfo.HasSendResponse()
-			if hasFirstByte {
-				firstByteMs = relayInfo.FirstResponseTime.Sub(relayInfo.StartTime).Milliseconds()
+			switch relayFormat {
+			case types.RelayFormatOpenAIRealtime:
+				newAPIError = relay.WssHelper(c, relayInfo)
+			case types.RelayFormatClaude:
+				newAPIError = relay.ClaudeHelper(c, relayInfo)
+			case types.RelayFormatGemini:
+				newAPIError = geminiRelayHandler(c, relayInfo)
+			default:
+				newAPIError = relayHandler(c, relayInfo)
 			}
-			adaptiveSuccess := relayInfo.StreamStatus == nil || relayInfo.StreamStatus.IsNormalEnd() && !relayInfo.StreamStatus.HasErrors() && (relayInfo.StreamStatus.ResponseOutcome() == "" || relayInfo.StreamStatus.ResponseOutcome() == "completed")
-			if adaptiveSuccess {
-				service.RecordAdaptiveChannelOutcome(relayInfo.UsingGroup, relayInfo.OriginModelName, channel.Id, http.StatusOK, true, firstByteMs, hasFirstByte)
+
+			if newAPIError == nil {
+				firstByteMs := int64(0)
+				hasFirstByte := relayInfo.HasSendResponse()
+				if hasFirstByte {
+					firstByteMs = relayInfo.FirstResponseTime.Sub(relayInfo.StartTime).Milliseconds()
+				}
+				adaptiveSuccess := relayInfo.StreamStatus == nil || relayInfo.StreamStatus.IsNormalEnd() && !relayInfo.StreamStatus.HasErrors() && (relayInfo.StreamStatus.ResponseOutcome() == "" || relayInfo.StreamStatus.ResponseOutcome() == "completed")
+				if adaptiveSuccess {
+					service.RecordAdaptiveChannelOutcome(relayInfo.UsingGroup, relayInfo.OriginModelName, channel.Id, http.StatusOK, true, firstByteMs, hasFirstByte)
+				}
+				service.MarkRequestPolicySuccess(c, relayInfo.StreamStatus)
+				relayInfo.LastError = nil
+				return
 			}
-			service.MarkRequestPolicySuccess(c, relayInfo.StreamStatus)
-			relayInfo.LastError = nil
-			return
+
+			newAPIError = service.NormalizeViolationFeeError(newAPIError)
+			relayInfo.LastError = newAPIError
+			lastStatusCode = newAPIError.StatusCode
+
+			decision := service.DecideRelayRetry(c, newAPIError, common.RetryTimes-retryParam.GetRetry())
+			service.RecordPolicyFailure(c, channel.Id, newAPIError, decision)
+
+			// 瞬时错误先在同一渠道原地重试，不占用换渠道预算；退避等待期间
+			// context 取消则直接终止。
+			if decision.Action == "retry_same_channel" {
+				service.MarkSameChannelRetry(c)
+				if !service.SleepWithContext(c.Request.Context(), operation_setting.SameChannelRetryBackoff(service.SameChannelRetryCount(c))) {
+					stopRetry = true
+					break
+				}
+				if setupErr := middleware.SetupContextForSelectedChannel(c, channel, relayInfo.OriginModelName); setupErr != nil {
+					newAPIError = setupErr
+					stopRetry = true
+					break
+				}
+				continue
+			}
+
+			processChannelError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(c, constant.ContextKeyChannelKey), channel.GetAutoBan()), newAPIError, relayInfo)
+			stopRetry = decision.Action != "retry"
+			break
 		}
-
-		newAPIError = service.NormalizeViolationFeeError(newAPIError)
-		relayInfo.LastError = newAPIError
-
-		decision := service.DecideRelayRetry(c, newAPIError, common.RetryTimes-retryParam.GetRetry())
-		service.RecordPolicyFailure(c, channel.Id, newAPIError, decision)
-		processChannelError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(c, constant.ContextKeyChannelKey), channel.GetAutoBan()), newAPIError, relayInfo)
-
-		if decision.Action != "retry" {
+		if stopRetry {
 			break
 		}
 	}
@@ -268,7 +313,12 @@ var upgrader = websocket.Upgrader{
 	},
 }
 
-func getChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service.RetryParam) (*model.Channel, *types.NewAPIError) {
+// statusClientClosedRequest marks a response nobody will read because the
+// client disconnected first. It is not an official status code; it exists so
+// access logs can tell a disconnect from a real upstream failure.
+const statusClientClosedRequest = 499
+
+func getChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service.RetryParam) (*model.Channel, *types.NewAPIError, bool) {
 	if info.ChannelMeta == nil {
 		autoBan := c.GetBool("auto_ban")
 		autoBanInt := 1
@@ -282,14 +332,14 @@ func getChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service
 			AutoBan: &autoBanInt,
 		}
 		service.RequestPolicy(c).BeginAttempt(channel, info.UsingGroup)
-		return channel, nil
+		return channel, nil, false
 	}
 	channel, selectGroup, err := service.CacheGetRandomSatisfiedChannel(retryParam)
 	if err != nil {
-		return nil, types.NewError(fmt.Errorf("获取分组 %s 下模型 %s 的可用渠道失败（retry）: %s", selectGroup, info.OriginModelName, err.Error()), types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
+		return nil, types.NewError(fmt.Errorf("获取分组 %s 下模型 %s 的可用渠道失败（retry）: %s", selectGroup, info.OriginModelName, err.Error()), types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry()), false
 	}
 	if channel == nil {
-		return nil, types.NewError(fmt.Errorf("分组 %s 下模型 %s 的可用渠道不存在（retry）", selectGroup, info.OriginModelName), types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
+		return nil, types.NewError(fmt.Errorf("分组 %s 下模型 %s 的可用渠道不存在（retry）", selectGroup, info.OriginModelName), types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry()), true
 	}
 
 	info.PriceData.GroupRatioInfo = helper.HandleGroupRatio(c, info)
@@ -297,9 +347,9 @@ func getChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service
 	service.RequestPolicy(c).BeginAttempt(channel, selectGroup)
 	newAPIError := middleware.SetupContextForSelectedChannel(c, channel, info.OriginModelName)
 	if newAPIError != nil {
-		return nil, newAPIError
+		return nil, newAPIError, false
 	}
-	return channel, nil
+	return channel, nil, false
 }
 
 func processChannelError(c *gin.Context, channelError types.ChannelError, err *types.NewAPIError, relayInfo *relaycommon.RelayInfo) {
@@ -506,6 +556,9 @@ func executeTaskSubmissionWith(
 		RequestPath: c.Request.URL.Path,
 		Retry:       common.GetPointer(0),
 	}
+	if operation_setting.GetRetryFailoverSetting().ExcludeFailedChannels {
+		retryParam.EnableExclusion()
+	}
 
 	for ; retryParam.GetRetry() <= common.RetryTimes; retryParam.IncreaseRetry() {
 		stage = "select_channel"
@@ -527,7 +580,7 @@ func executeTaskSubmissionWith(
 			}
 		} else {
 			var channelErr *types.NewAPIError
-			channel, channelErr = getChannel(c, relayInfo, retryParam)
+			channel, channelErr, _ = getChannel(c, relayInfo, retryParam)
 			if channelErr != nil {
 				logger.LogError(c, channelErr.Error())
 				taskErr = service.TaskErrorWrapperLocal(channelErr.Err, "get_channel_failed", channelErr.StatusCode)
@@ -537,6 +590,7 @@ func executeTaskSubmissionWith(
 		diagnostics.attempt(retryParam.GetRetry()+1, channel, relayInfo.LockedChannel != nil)
 
 		service.AppendUsedChannel(c, channel.Id)
+		retryParam.MarkTried(channel.Id)
 		bodyStorage, bodyErr := common.GetBodyStorage(c)
 		if bodyErr != nil {
 			stage = "read_body"

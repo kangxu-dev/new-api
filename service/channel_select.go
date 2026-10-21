@@ -48,6 +48,45 @@ type RetryParam struct {
 	RequestPath  string
 	Retry        *int
 	resetNextTry bool
+	// tried holds the channels that already failed in this request, so a retry
+	// never re-selects one of them. Nil when exclusion is disabled.
+	tried map[int]struct{}
+}
+
+// MarkTried records a channel that failed in this request. It is a no-op when
+// the caller did not opt into exclusion.
+func (p *RetryParam) MarkTried(channelID int) {
+	if p == nil || p.tried == nil {
+		return
+	}
+	p.tried[channelID] = struct{}{}
+}
+
+// TriedChannels exposes the exclusion set to the channel selection helpers.
+// A nil result means the caller did not opt into exclusion.
+func (p *RetryParam) TriedChannels() map[int]struct{} {
+	if p == nil {
+		return nil
+	}
+	return p.tried
+}
+
+// ClearTried drops every exclusion, used when a selection-exhausted backoff
+// retries the same candidate pool. It is a no-op when exclusion is disabled.
+func (p *RetryParam) ClearTried() {
+	if p == nil || p.tried == nil {
+		return
+	}
+	p.tried = make(map[int]struct{})
+}
+
+// EnableExclusion turns on per-request channel exclusion. Without it, MarkTried
+// records nothing and selection is free to re-pick a failed channel.
+func (p *RetryParam) EnableExclusion() {
+	if p == nil {
+		return
+	}
+	p.tried = make(map[int]struct{})
 }
 
 func (p *RetryParam) GetRetry() int {
@@ -153,6 +192,7 @@ func CacheGetRandomSatisfiedChannel(param *RetryParam) (*model.Channel, string, 
 				priorityRetry,
 				filters,
 				AdaptiveChannelWeightMultipliers(autoGroup, param.ModelName),
+				param.TriedChannels(),
 			)
 			if channel == nil {
 				// Current group has no available channel for this model, try next group
@@ -197,6 +237,7 @@ func CacheGetRandomSatisfiedChannel(param *RetryParam) (*model.Channel, string, 
 			param.GetRetry(),
 			filters,
 			AdaptiveChannelWeightMultipliers(param.TokenGroup, param.ModelName),
+			param.TriedChannels(),
 		)
 		if err != nil {
 			return nil, param.TokenGroup, err

@@ -40,9 +40,10 @@ var requestPolicyDefaults = requestPolicyDefaultOptions()
 func requestPolicyDefaultOptions() map[string]string {
 	defaults := make(map[string]string)
 	for prefix, value := range map[string]any{
-		"channel_affinity_setting.": operation_setting.GetChannelAffinitySetting(),
+		"channel_affinity_setting.":         operation_setting.GetChannelAffinitySetting(),
 		"adaptive_channel_routing_setting.": operation_setting.GetAdaptiveChannelRoutingSetting(),
-		"monitor_setting.":          operation_setting.GetMonitorSetting(),
+		"retry_failover_setting.":           operation_setting.GetRetryFailoverSetting(),
+		"monitor_setting.":                  operation_setting.GetMonitorSetting(),
 	} {
 		fields, err := config.ConfigToMap(value)
 		if err != nil {
@@ -66,7 +67,7 @@ func requestPolicyDefaultOptions() map[string]string {
 }
 
 func IsRequestPolicyOption(key string) bool {
-	if strings.HasPrefix(key, "channel_affinity_setting.") || strings.HasPrefix(key, "adaptive_channel_routing_setting.") {
+	if strings.HasPrefix(key, "channel_affinity_setting.") || strings.HasPrefix(key, "adaptive_channel_routing_setting.") || strings.HasPrefix(key, "retry_failover_setting.") {
 		return true
 	}
 	switch key {
@@ -101,6 +102,7 @@ func BuildRequestPolicy(options map[string]string) (*RequestPolicySnapshot, erro
 	snapshot := &RequestPolicySnapshot{Options: raw}
 	affinityFields := map[string]string{}
 	adaptiveFields := map[string]string{}
+	retryFailoverFields := map[string]string{}
 	for key, value := range raw {
 		if field, ok := strings.CutPrefix(key, "channel_affinity_setting."); ok {
 			switch field {
@@ -117,6 +119,16 @@ func BuildRequestPolicy(options map[string]string) (*RequestPolicySnapshot, erro
 				return nil, fmt.Errorf("unknown adaptive channel routing option: %s", key)
 			}
 			adaptiveFields[field] = value
+		}
+		if field, ok := strings.CutPrefix(key, "retry_failover_setting."); ok {
+			switch field {
+			case "exclude_failed_channels", "stop_after_response_written", "same_channel_retries",
+				"same_channel_status_codes", "backoff_ms", "backoff_max_ms",
+				"selection_exhausted_backoff_ms", "cooldown_seconds", "cooldown_status_codes":
+			default:
+				return nil, fmt.Errorf("unknown retry failover option: %s", key)
+			}
+			retryFailoverFields[field] = value
 		}
 	}
 	// Decode through JSON so malformed scalar/array values cannot be silently ignored.
@@ -138,12 +150,7 @@ func BuildRequestPolicy(options map[string]string) (*RequestPolicySnapshot, erro
 	}
 	adaptiveJSON := map[string]json.RawMessage{}
 	for key, value := range adaptiveFields {
-		if key == "enabled" {
-			encoded, _ := common.Marshal(value)
-			adaptiveJSON[key] = encoded
-		} else {
-			adaptiveJSON[key] = json.RawMessage(value)
-		}
+		adaptiveJSON[key] = json.RawMessage(value)
 	}
 	encoded, err = common.Marshal(adaptiveJSON)
 	if err != nil {
@@ -158,6 +165,36 @@ func BuildRequestPolicy(options map[string]string) (*RequestPolicySnapshot, erro
 	}
 	if adaptiveSetting.MinSamples < 1 || adaptiveSetting.MinSamples > 10000 {
 		return nil, fmt.Errorf("adaptive scoring minimum samples must be between 1 and 10000")
+	}
+	retryFailoverJSON := map[string]json.RawMessage{}
+	for key, value := range retryFailoverFields {
+		if key == "same_channel_status_codes" || key == "cooldown_status_codes" {
+			encoded, _ := common.Marshal(value)
+			retryFailoverJSON[key] = encoded
+		} else {
+			retryFailoverJSON[key] = json.RawMessage(value)
+		}
+	}
+	encoded, err = common.Marshal(retryFailoverJSON)
+	if err != nil {
+		return nil, err
+	}
+	var retryFailover operation_setting.RetryFailoverSetting
+	if err := common.Unmarshal(encoded, &retryFailover); err != nil {
+		return nil, err
+	}
+	for _, codes := range []string{retryFailover.SameChannelStatusCodes, retryFailover.CooldownStatusCodes} {
+		if _, err := operation_setting.ParseHTTPStatusCodeRanges(codes); err != nil {
+			return nil, err
+		}
+	}
+	if retryFailover.SameChannelRetries < 0 || retryFailover.SameChannelRetries > 99 {
+		return nil, fmt.Errorf("same channel retries must be between 0 and 99")
+	}
+	for _, value := range []int{retryFailover.BackoffMs, retryFailover.BackoffMaxMs, retryFailover.SelectionExhaustedBackoffMs, retryFailover.CooldownSeconds} {
+		if value < 0 {
+			return nil, fmt.Errorf("retry failover durations must not be negative")
+		}
 	}
 	snapshot.RetryTimes, err = strconv.Atoi(raw["RetryTimes"])
 	if err != nil || snapshot.RetryTimes < 0 || snapshot.RetryTimes == math.MaxInt {

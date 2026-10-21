@@ -40,6 +40,14 @@ export function RetrySection() {
     control: form.control,
     name: 'adaptive_channel_routing_setting.enabled',
   })
+  const sameChannelRetries = useWatch({
+    control: form.control,
+    name: 'retry_failover_setting.same_channel_retries',
+  })
+  const cooldownSeconds = useWatch({
+    control: form.control,
+    name: 'retry_failover_setting.cooldown_seconds',
+  })
   return (
     <div className='space-y-4'>
       <SettingsCard title={t('Retry budget')} className='shadow-none'>
@@ -85,6 +93,220 @@ export function RetrySection() {
               </FormItem>
             )}
           />
+        </div>
+      </SettingsCard>
+      <SettingsCard
+        title={t('Channel failover')}
+        description={t(
+          'How a failed attempt moves to another channel instead of repeating the one that just failed.'
+        )}
+        className='shadow-none'
+      >
+        <div className='space-y-4'>
+          <FormField
+            control={form.control}
+            name='retry_failover_setting.exclude_failed_channels'
+            render={({ field }) => (
+              <SettingsSwitchField
+                controlId='retry_failover_setting.exclude_failed_channels'
+                checked={field.value}
+                onCheckedChange={field.onChange}
+                label={t('Never retry on a channel that already failed')}
+                description={t(
+                  'Keeps a retry from re-selecting a channel that failed earlier in the same request.'
+                )}
+              />
+            )}
+          />
+          <FormField
+            control={form.control}
+            name='retry_failover_setting.stop_after_response_written'
+            render={({ field }) => (
+              <SettingsSwitchField
+                controlId='retry_failover_setting.stop_after_response_written'
+                checked={field.value}
+                onCheckedChange={field.onChange}
+                label={t('Stop retrying once the response has started')}
+                description={t(
+                  'Switching channels after bytes reached the client would append a second stream to the same response. SSE keepalives do not count.'
+                )}
+              />
+            )}
+          />
+          <div className='grid gap-4 sm:grid-cols-2'>
+            <FormField
+              control={form.control}
+              name='retry_failover_setting.same_channel_retries'
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>
+                    {t('Same-channel retries before switching')}
+                  </FormLabel>
+                  <FormControl>
+                    <Input
+                      type='number'
+                      min={0}
+                      max={99}
+                      step={1}
+                      {...safeNumberFieldProps(field)}
+                    />
+                  </FormControl>
+                  <FormDescription>
+                    {t(
+                      'Transient upstream errors retry in place first. Zero switches channel immediately.'
+                    )}
+                  </FormDescription>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+            <FormField
+              control={form.control}
+              name='retry_failover_setting.same_channel_status_codes'
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>{t('Same-channel retry status codes')}</FormLabel>
+                  <FormControl>
+                    <Input
+                      {...field}
+                      disabled={sameChannelRetries === 0}
+                      placeholder={t('e.g. 429, 500-503, 529')}
+                    />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+          </div>
+          {sameChannelRetries > 0 ? (
+            <div className='grid gap-4 sm:grid-cols-2'>
+              <FormField
+                control={form.control}
+                name='retry_failover_setting.backoff_ms'
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>{t('Retry backoff (ms)')}</FormLabel>
+                    <FormControl>
+                      <Input
+                        type='number'
+                        min={0}
+                        max={60000}
+                        step={100}
+                        {...safeNumberFieldProps(field)}
+                      />
+                    </FormControl>
+                    <FormDescription>
+                      {t('Doubles after every retry.')}
+                    </FormDescription>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+              <FormField
+                control={form.control}
+                name='retry_failover_setting.backoff_max_ms'
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>{t('Retry backoff cap (ms)')}</FormLabel>
+                    <FormControl>
+                      <Input
+                        type='number'
+                        min={0}
+                        max={600000}
+                        step={100}
+                        {...safeNumberFieldProps(field)}
+                      />
+                    </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+            </div>
+          ) : null}
+          <FormField
+            control={form.control}
+            name='retry_failover_setting.selection_exhausted_backoff_ms'
+            render={({ field }) => (
+              <FormItem>
+                <FormLabel>
+                  {t('Wait before reusing an exhausted channel pool (ms)')}
+                </FormLabel>
+                <FormControl>
+                  <Input
+                    type='number'
+                    min={0}
+                    max={60000}
+                    step={100}
+                    {...safeNumberFieldProps(field)}
+                  />
+                </FormControl>
+                <FormDescription>
+                  {t(
+                    'After an upstream 503 empties the candidate pool, wait this long, clear the exclusion list and select again.'
+                  )}
+                </FormDescription>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+        </div>
+      </SettingsCard>
+      <SettingsCard
+        title={t('Channel cooldown')}
+        description={t(
+          'Removes a failing channel from selection for a while instead of disabling it permanently.'
+        )}
+        className='shadow-none'
+      >
+        <div className='space-y-4'>
+          <div className='grid gap-4 sm:grid-cols-2'>
+            <FormField
+              control={form.control}
+              name='retry_failover_setting.cooldown_seconds'
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>{t('Cooldown duration (seconds)')}</FormLabel>
+                  <FormControl>
+                    <Input
+                      type='number'
+                      min={0}
+                      max={86400}
+                      step={10}
+                      {...safeNumberFieldProps(field)}
+                    />
+                  </FormControl>
+                  <FormDescription>
+                    {t('Zero disables cooldowns.')}
+                  </FormDescription>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+            <FormField
+              control={form.control}
+              name='retry_failover_setting.cooldown_status_codes'
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>{t('Cooldown status codes')}</FormLabel>
+                  <FormControl>
+                    <Input
+                      {...field}
+                      disabled={cooldownSeconds === 0}
+                      placeholder={t('e.g. 429, 500-503, 529')}
+                    />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+          </div>
+          {cooldownSeconds > 0 ? (
+            <p className='text-muted-foreground text-sm'>
+              {t(
+                'While a cooldown is active, these status codes no longer disable the channel permanently. Codes outside this range keep the existing automatic-disable behavior.'
+              )}
+            </p>
+          ) : null}
         </div>
       </SettingsCard>
       <SettingsCard

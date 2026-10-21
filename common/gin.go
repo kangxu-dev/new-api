@@ -196,6 +196,37 @@ func GetContextKeyType[T any](c *gin.Context, key constant.ContextKey) (T, bool)
 	return t, false
 }
 
+// streamHeartbeatBytesKey counts the SSE keepalive bytes already written to a
+// client. They are comments the client ignores, so a failed attempt may still
+// switch channels while the response carries nothing else.
+const streamHeartbeatBytesKey = "stream_heartbeat_bytes"
+
+// AddStreamHeartbeatBytes records keepalive bytes written to the response.
+func AddStreamHeartbeatBytes(c *gin.Context, n int) {
+	if c == nil || n <= 0 {
+		return
+	}
+	c.Set(streamHeartbeatBytesKey, c.GetInt(streamHeartbeatBytesKey)+n)
+}
+
+// StreamHeartbeatBytes returns how many keepalive bytes the response holds.
+func StreamHeartbeatBytes(c *gin.Context) int {
+	if c == nil {
+		return 0
+	}
+	return c.GetInt(streamHeartbeatBytesKey)
+}
+
+// ResponseBodyWritten reports whether the response holds bytes beyond SSE
+// keepalives. Once it does, switching channels would append a second stream to
+// the same HTTP response.
+func ResponseBodyWritten(c *gin.Context) bool {
+	if c == nil || c.Writer == nil {
+		return false
+	}
+	return c.Writer.Size() > StreamHeartbeatBytes(c)
+}
+
 func ApiError(c *gin.Context, err error) {
 	c.JSON(http.StatusOK, gin.H{
 		"success": false,

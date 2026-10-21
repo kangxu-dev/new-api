@@ -37,6 +37,21 @@ func ChannelSatisfiesFilters(ch *Channel, modelName string, filters []dto.Channe
 // Caller must hold channelSyncLock (read lock). The input slice is never mutated.
 // A missing id in channelsIDM is kept for request_path (downstream consistency
 // error) and dropped for task_plugin_identity, matching the previous filters.
+// excludeCandidateIDs drops channels that already failed earlier in the same
+// request, so a retry cannot re-select them. The input slice is never mutated.
+func excludeCandidateIDs(ids []int, excluded map[int]struct{}) []int {
+	if len(ids) == 0 || len(excluded) == 0 {
+		return ids
+	}
+	kept := make([]int, 0, len(ids))
+	for _, id := range ids {
+		if _, skip := excluded[id]; !skip {
+			kept = append(kept, id)
+		}
+	}
+	return kept
+}
+
 func filterCandidateIDs(ids []int, modelName string, filters []dto.ChannelFilter) (kept []int, emptiedBy dto.ChannelFilterKind) {
 	if len(ids) == 0 {
 		return ids, ""

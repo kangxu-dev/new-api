@@ -216,3 +216,58 @@ func TestChannelSatisfiesFilters(t *testing.T) {
 	assert.False(t, ok)
 	assert.Equal(t, dto.FilterRequestPath, kind)
 }
+
+func TestExcludeCandidateIDs(t *testing.T) {
+	candidates := []int{11, 22, 33}
+
+	assert.Equal(t, candidates, excludeCandidateIDs(candidates, nil), "no exclusion set keeps every candidate")
+	assert.Equal(t, candidates, excludeCandidateIDs(candidates, map[int]struct{}{}), "an empty exclusion set keeps every candidate")
+	assert.Equal(t, []int{11, 33}, excludeCandidateIDs(candidates, map[int]struct{}{22: {}}))
+	assert.Empty(t, excludeCandidateIDs(candidates, map[int]struct{}{11: {}, 22: {}, 33: {}}),
+		"a retry that exhausted the pool selects nothing rather than repeating a failed channel")
+	assert.Equal(t, candidates, excludeCandidateIDs(candidates, map[int]struct{}{44: {}}), "ids outside the pool are ignored")
+	assert.Equal(t, []int{11, 22, 33}, candidates, "the input slice is never mutated")
+}
+
+func TestGetRandomSatisfiedChannelSkipsTriedChannels(t *testing.T) {
+	previousMemoryCache := common.MemoryCacheEnabled
+	common.MemoryCacheEnabled = true
+	t.Cleanup(func() { common.MemoryCacheEnabled = previousMemoryCache })
+
+	// The selection helper takes the read lock itself, so the fixture must not
+	// hold the write lock while calling it.
+	channelSyncLock.Lock()
+	previousIndex := channelsIDM
+	previousGroups := group2model2channels
+	channelsIDM = map[int]*Channel{
+		910001: {Id: 910001, Name: "first", Status: common.ChannelStatusEnabled},
+		910002: {Id: 910002, Name: "second", Status: common.ChannelStatusEnabled},
+	}
+	group2model2channels = map[string]map[string][]int{
+		"default": {"gpt-4": {910001, 910002}},
+	}
+	channelSyncLock.Unlock()
+	t.Cleanup(func() {
+		channelSyncLock.Lock()
+		channelsIDM = previousIndex
+		group2model2channels = previousGroups
+		channelSyncLock.Unlock()
+	})
+
+	selected := func(excluded map[int]struct{}) int {
+		channel, err := GetRandomSatisfiedChannelWithMultipliers("default", "gpt-4", 0, nil, nil, excluded)
+		require.NoError(t, err)
+		require.NotNil(t, channel)
+		return channel.Id
+	}
+
+	assert.Equal(t, 910002, selected(map[int]struct{}{910001: {}}),
+		"a retry skips the channel that already failed")
+	assert.Equal(t, 910001, selected(map[int]struct{}{910002: {}}))
+
+	// Excluding every candidate must still return a channel: failing the
+	// request outright would be worse than repeating the only option, and a
+	// single-channel group depends on this to keep retrying.
+	assert.Contains(t, []int{910001, 910002}, selected(map[int]struct{}{910001: {}, 910002: {}}),
+		"an exhausted pool falls back to the channels that already failed")
+}

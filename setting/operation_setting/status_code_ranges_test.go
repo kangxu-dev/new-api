@@ -2,6 +2,7 @@ package operation_setting
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -84,4 +85,37 @@ func TestIsAlwaysSkipRetryStatusCode(t *testing.T) {
 	require.True(t, IsAlwaysSkipRetryStatusCode(504))
 	require.True(t, IsAlwaysSkipRetryStatusCode(524))
 	require.False(t, IsAlwaysSkipRetryStatusCode(500))
+}
+
+func TestSameChannelRetryBackoffDoublesAndCaps(t *testing.T) {
+	previous := retryFailoverSetting
+	t.Cleanup(func() { retryFailoverSetting = previous })
+	retryFailoverSetting.BackoffMs = 500
+	retryFailoverSetting.BackoffMaxMs = 8000
+
+	require.Equal(t, 500*time.Millisecond, SameChannelRetryBackoff(0))
+	require.Equal(t, 500*time.Millisecond, SameChannelRetryBackoff(1))
+	require.Equal(t, time.Second, SameChannelRetryBackoff(2))
+	require.Equal(t, 2*time.Second, SameChannelRetryBackoff(3))
+	require.Equal(t, 4*time.Second, SameChannelRetryBackoff(4))
+	require.Equal(t, 8*time.Second, SameChannelRetryBackoff(5))
+	require.Equal(t, 8*time.Second, SameChannelRetryBackoff(9), "the cap holds for a high retry budget")
+
+	retryFailoverSetting.BackoffMs = 0
+	require.Zero(t, SameChannelRetryBackoff(3), "a zero base disables the wait")
+}
+
+func TestSameChannelRetryStatusCodesDefaults(t *testing.T) {
+	require.True(t, IsSameChannelRetryStatusCode(429))
+	require.True(t, IsSameChannelRetryStatusCode(503))
+	require.True(t, IsSameChannelRetryStatusCode(529))
+	require.False(t, IsSameChannelRetryStatusCode(401), "credential failures switch channel instead")
+	require.False(t, IsSameChannelRetryStatusCode(400))
+	require.False(t, IsSameChannelRetryStatusCode(504), "an upstream timeout is not worth retrying in place")
+
+	require.True(t, IsCooldownStatusCode(429))
+	require.True(t, IsCooldownStatusCode(500))
+	require.True(t, IsCooldownStatusCode(502))
+	require.False(t, IsCooldownStatusCode(400))
+	require.False(t, IsCooldownStatusCode(401))
 }

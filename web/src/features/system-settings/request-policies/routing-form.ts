@@ -12,6 +12,27 @@ export function createRoutingPolicySchema(t: TFunction) {
         (value) => parseHttpStatusCodeRules(value).ok,
         t('Invalid status code rules')
       ),
+    retry_failover_setting: z.object({
+      exclude_failed_channels: z.boolean(),
+      stop_after_response_written: z.boolean(),
+      same_channel_retries: z.number().int().min(0).max(99),
+      same_channel_status_codes: z
+        .string()
+        .refine(
+          (value) => parseHttpStatusCodeRules(value).ok,
+          t('Invalid status code rules')
+        ),
+      backoff_ms: z.number().int().min(0).max(60000),
+      backoff_max_ms: z.number().int().min(0).max(600000),
+      selection_exhausted_backoff_ms: z.number().int().min(0).max(60000),
+      cooldown_seconds: z.number().int().min(0).max(86400),
+      cooldown_status_codes: z
+        .string()
+        .refine(
+          (value) => parseHttpStatusCodeRules(value).ok,
+          t('Invalid status code rules')
+        ),
+    }),
     adaptive_channel_routing_setting: z.object({
       enabled: z.boolean(),
       window_minutes: z.number().int().min(1).max(60),
@@ -54,6 +75,35 @@ export function routingPolicyFormValues(
   return {
     RetryTimes: Number(options.RetryTimes),
     AutomaticRetryStatusCodes: options.AutomaticRetryStatusCodes,
+    retry_failover_setting: {
+      exclude_failed_channels:
+        options['retry_failover_setting.exclude_failed_channels'] !== 'false',
+      stop_after_response_written:
+        options['retry_failover_setting.stop_after_response_written'] !==
+        'false',
+      same_channel_retries: Number(
+        options['retry_failover_setting.same_channel_retries'] || 0
+      ),
+      same_channel_status_codes:
+        options['retry_failover_setting.same_channel_status_codes'] ||
+        '429,500,502,503,529',
+      backoff_ms: Number(
+        options['retry_failover_setting.backoff_ms'] || 500
+      ),
+      backoff_max_ms: Number(
+        options['retry_failover_setting.backoff_max_ms'] || 8000
+      ),
+      selection_exhausted_backoff_ms: Number(
+        options['retry_failover_setting.selection_exhausted_backoff_ms'] ||
+          2000
+      ),
+      cooldown_seconds: Number(
+        options['retry_failover_setting.cooldown_seconds'] || 0
+      ),
+      cooldown_status_codes:
+        options['retry_failover_setting.cooldown_status_codes'] ||
+        '429,500-503,529',
+    },
     adaptive_channel_routing_setting: {
       enabled:
         options['adaptive_channel_routing_setting.enabled'] === 'true',
@@ -87,6 +137,12 @@ export function routingPolicyOptions(
   return {
     RetryTimes: String(values.RetryTimes),
     AutomaticRetryStatusCodes: values.AutomaticRetryStatusCodes,
+    ...Object.fromEntries(
+      Object.entries(values.retry_failover_setting).map(([key, value]) => [
+        `retry_failover_setting.${key}`,
+        String(value),
+      ])
+    ),
     ...Object.fromEntries(
       Object.entries(values.adaptive_channel_routing_setting).map(
         ([key, value]) => [`adaptive_channel_routing_setting.${key}`, String(value)]

@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -15,6 +16,7 @@ import (
 	"github.com/QuantumNous/new-api/model"
 	kitdto "github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
+	"github.com/QuantumNous/new-api/setting/config"
 	"github.com/QuantumNous/new-api/setting/system_setting"
 
 	"github.com/gin-gonic/gin"
@@ -150,6 +152,20 @@ func TestDecideRelayRetryReasons(t *testing.T) {
 			c.Set(ginKeyChannelAffinitySkipRetry, true)
 			RequestPolicy(c).SessionModeSource = "global"
 		}, want: PolicyDecision{Action: "stop", Reason: "strict_session", Source: "global"}},
+		{name: "client gone stops retrying", err: upstream(http.StatusTooManyRequests), retries: 1, setup: func(c *gin.Context) {
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil).WithContext(ctx)
+		}, want: PolicyDecision{Action: "stop", Reason: "client_gone", Source: "system"}},
+		{name: "committed response stops retrying", err: upstream(http.StatusTooManyRequests), retries: 1, setup: func(c *gin.Context) {
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+			_, _ = c.Writer.WriteString("data: {\"id\":\"chunk\"}\n\n")
+		}, want: PolicyDecision{Action: "stop", Reason: "response_committed", Source: "system"}},
+		{name: "sse keepalive bytes alone still allow a retry", err: upstream(http.StatusTooManyRequests), retries: 1, setup: func(c *gin.Context) {
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+			_, _ = c.Writer.WriteString(": PING\n\n")
+			common.AddStreamHeartbeatBytes(c, len(": PING\n\n"))
+		}, want: PolicyDecision{Action: "retry", Reason: "retry_status_matched", Source: "global"}},
 		{name: "nil error", retries: 1, want: PolicyDecision{Action: "stop", Reason: "request_completed", Source: "system"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -162,6 +178,50 @@ func TestDecideRelayRetryReasons(t *testing.T) {
 			assert.Equal(t, tc.want.Action == "retry", ShouldRetryRelayError(c, tc.err, tc.retries))
 		})
 	}
+}
+
+func TestDecideRelayRetryPrefersSameChannelForTransientStatus(t *testing.T) {
+	settings := config.GlobalConfig.Get("retry_failover_setting")
+	require.NoError(t, config.UpdateConfigFromMap(settings, map[string]string{"same_channel_retries": "2"}))
+	t.Cleanup(func() {
+		require.NoError(t, config.UpdateConfigFromMap(settings, map[string]string{"same_channel_retries": "0"}))
+	})
+	upstream := func(status int) *types.NewAPIError {
+		return types.NewOpenAIError(errors.New("upstream"), types.ErrorCodeBadResponseStatusCode, status)
+	}
+	sameChannel := PolicyDecision{Action: "retry_same_channel", Reason: "same_channel_retry_status_matched", Source: "global"}
+
+	for _, tc := range []struct {
+		name       string
+		err        *types.NewAPIError
+		used       int
+		wantAction string
+	}{
+		{name: "transient status retries in place", err: upstream(http.StatusTooManyRequests), used: 0, wantAction: "retry_same_channel"},
+		{name: "second same-channel retry still fits the budget", err: upstream(http.StatusServiceUnavailable), used: 1, wantAction: "retry_same_channel"},
+		{name: "budget exhausted switches channel", err: upstream(http.StatusTooManyRequests), used: 2, wantAction: "retry"},
+		{name: "status outside the same-channel range switches channel", err: upstream(http.StatusUnauthorized), used: 0, wantAction: "retry"},
+		{name: "channel credential error switches channel", err: types.NewError(errors.New("no key"), types.ErrorCodeChannelNoAvailableKey), used: 0, wantAction: "retry"},
+		{name: "non retryable status still stops", err: upstream(http.StatusBadRequest), used: 0, wantAction: "stop"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			for range tc.used {
+				MarkSameChannelRetry(c)
+			}
+			decision := DecideRelayRetry(c, tc.err, 3)
+			assert.Equal(t, tc.wantAction, decision.Action)
+			if tc.wantAction == "retry_same_channel" {
+				assert.Equal(t, sameChannel, decision)
+			}
+		})
+	}
+
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	MarkSameChannelRetry(c)
+	assert.Equal(t, 1, SameChannelRetryCount(c))
+	ResetSameChannelRetry(c)
+	assert.Equal(t, 0, SameChannelRetryCount(c), "switching channel gives the next one a fresh budget")
 }
 
 func TestRequestPolicyEventsReachLogAdminInfo(t *testing.T) {
