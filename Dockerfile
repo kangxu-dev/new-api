@@ -54,6 +54,14 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && update-ca-certificates
 
+# Clear the build-time proxy now that the only step needing it is done. The
+# ARG/ENV pair above exists so RUN can reach the network through a proxy, but
+# letting those values survive into the image makes every container inherit a
+# build-host address it cannot route to, and the app then fails on its first
+# outbound request with "proxyconnect ... no route to host". Set the proxy again
+# at run time (compose environment, docker run -e) if the runtime needs one.
+ENV HTTP_PROXY= HTTPS_PROXY= NO_PROXY=
+
 COPY --from=builder2 /build/new-api /
 COPY LICENSE NOTICE THIRD-PARTY-LICENSES.md /licenses/
 EXPOSE 3000
