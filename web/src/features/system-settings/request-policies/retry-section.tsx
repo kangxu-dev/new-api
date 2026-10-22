@@ -28,6 +28,8 @@ import {
   FormMessage,
 } from '@/components/ui/form'
 import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
 import { SettingsCard } from '../components/settings-card'
 import { SettingsSwitchField } from '../components/settings-form-layout'
 import { safeNumberFieldProps } from '../utils/numeric-field'
@@ -39,6 +41,10 @@ export function RetrySection() {
   const adaptiveEnabled = useWatch({
     control: form.control,
     name: 'adaptive_channel_routing_setting.enabled',
+  })
+  const latencyMode = useWatch({
+    control: form.control,
+    name: 'adaptive_channel_routing_setting.latency_mode',
   })
   const sameChannelRetries = useWatch({
     control: form.control,
@@ -373,6 +379,126 @@ export function RetrySection() {
                 )}
               />
             </div>
+          ) : null}
+          {adaptiveEnabled ? (
+            <>
+              <FormField
+                control={form.control}
+                name='adaptive_channel_routing_setting.latency_mode'
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>{t('Latency weighting')}</FormLabel>
+                    <FormControl>
+                      <RadioGroup
+                        aria-label={t('Latency weighting')}
+                        value={field.value || 'absolute'}
+                        onValueChange={field.onChange}
+                        className='gap-2 sm:grid-cols-2'
+                      >
+                        {(['absolute', 'ratio'] as const).map((mode) => (
+                          <div key={mode} className='rounded-lg border'>
+                            <Label
+                              htmlFor={`adaptive-latency-${mode}`}
+                              className='hover:bg-muted/30 flex h-full cursor-pointer items-center gap-3 rounded-lg px-4 py-3 font-normal'
+                            >
+                              <RadioGroupItem
+                                id={`adaptive-latency-${mode}`}
+                                value={mode}
+                                onClick={() => field.onChange(mode)}
+                              />
+                              <span className='min-w-0'>
+                                {t(
+                                  mode === 'ratio'
+                                    ? 'Relative to the fastest channel'
+                                    : 'Absolute curve (legacy)'
+                                )}
+                              </span>
+                            </Label>
+                          </div>
+                        ))}
+                      </RadioGroup>
+                    </FormControl>
+                    <FormDescription>
+                      {t(
+                        'The legacy curve was tuned for sub-second first bytes and flattens out on slow upstreams, so a large latency gap barely moves the weight. The relative mode scores each channel against the fastest one seen for the same group and model, which needs no reference value.'
+                      )}
+                    </FormDescription>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+              {latencyMode === 'ratio' ? (
+                <FormField
+                  control={form.control}
+                  name='adaptive_channel_routing_setting.latency_exponent'
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>{t('Latency exponent')}</FormLabel>
+                      <FormControl>
+                        <Input
+                          type='number'
+                          min={0.1}
+                          max={10}
+                          step={0.1}
+                          {...safeNumberFieldProps(field)}
+                        />
+                      </FormControl>
+                      <FormDescription>
+                        {t(
+                          'How hard a latency gap weighs. With 2, a channel twice as slow keeps a quarter of the weight; with 3, an eighth.'
+                        )}
+                      </FormDescription>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+              ) : null}
+              <div className='grid gap-4 sm:grid-cols-2'>
+                <FormField
+                  control={form.control}
+                  name='adaptive_channel_routing_setting.multiplier_min'
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>{t('Weight multiplier floor')}</FormLabel>
+                      <FormControl>
+                        <Input
+                          type='number'
+                          min={0}
+                          max={1}
+                          step={0.05}
+                          {...safeNumberFieldProps(field)}
+                        />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+                <FormField
+                  control={form.control}
+                  name='adaptive_channel_routing_setting.multiplier_max'
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>{t('Weight multiplier ceiling')}</FormLabel>
+                      <FormControl>
+                        <Input
+                          type='number'
+                          min={1}
+                          max={10}
+                          step={0.05}
+                          {...safeNumberFieldProps(field)}
+                        />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+              </div>
+              <p className='text-muted-foreground text-sm'>
+                {t(
+                  'The band bounds how far traffic can shift. With the default 0.5 to 1.5 the fastest channel takes at most three quarters of the traffic; widen the ceiling for a stronger preference.'
+                )}
+              </p>
+            </>
           ) : null}
         </div>
       </SettingsCard>

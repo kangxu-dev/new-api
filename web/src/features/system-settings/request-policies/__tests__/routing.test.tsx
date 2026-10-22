@@ -900,3 +900,42 @@ it('explains that a cooldown replaces permanent disabling only inside its status
     )
   ).toBeVisible()
 })
+it('switches adaptive scoring to relative latency and saves the exponent and band', async () => {
+  show()
+  await userEvent.click(
+    await screen.findByRole('switch', {
+      name: 'Use adaptive scores for same-priority channels',
+    })
+  )
+  expect(
+    screen.getByRole('radio', { name: 'Absolute curve (legacy)' })
+  ).toBeChecked()
+  expect(
+    screen.queryByRole('spinbutton', { name: 'Latency exponent' })
+  ).not.toBeInTheDocument()
+
+  await userEvent.click(
+    screen.getByRole('radio', { name: 'Relative to the fastest channel' })
+  )
+
+  const exponent = screen.getByRole('spinbutton', {
+    name: 'Latency exponent',
+  })
+  fireEvent.change(exponent, { target: { value: '3' } })
+  fireEvent.change(
+    screen.getByRole('spinbutton', { name: 'Weight multiplier ceiling' }),
+    { target: { value: '2.5' } }
+  )
+  await userEvent.click(screen.getByRole('button', { name: 'Save Changes' }))
+
+  await waitFor(() => expect(api.patch).toHaveBeenCalledTimes(1))
+  const payload = vi.mocked(api.patch).mock.calls[0][1] as {
+    options: Record<string, string>
+  }
+  expect(payload.options).toEqual({
+    'adaptive_channel_routing_setting.enabled': 'true',
+    'adaptive_channel_routing_setting.latency_mode': 'ratio',
+    'adaptive_channel_routing_setting.latency_exponent': '3',
+    'adaptive_channel_routing_setting.multiplier_max': '2.5',
+  })
+})

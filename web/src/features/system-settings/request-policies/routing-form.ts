@@ -37,6 +37,10 @@ export function createRoutingPolicySchema(t: TFunction) {
       enabled: z.boolean(),
       window_minutes: z.number().int().min(1).max(60),
       min_samples: z.number().int().min(1).max(10000),
+      latency_mode: z.enum(['absolute', 'ratio']),
+      latency_exponent: z.number().min(0.1).max(10),
+      multiplier_min: z.number().min(0).max(1),
+      multiplier_max: z.number().min(1).max(10),
     }),
     channel_affinity_setting: z.object({
       enabled: z.boolean(),
@@ -112,6 +116,19 @@ export function routingPolicyFormValues(
       ),
       min_samples: Number(
         options['adaptive_channel_routing_setting.min_samples'] || 10
+      ),
+      latency_mode:
+        options['adaptive_channel_routing_setting.latency_mode'] === 'ratio'
+          ? 'ratio'
+          : 'absolute',
+      latency_exponent: Number(
+        options['adaptive_channel_routing_setting.latency_exponent'] || 2
+      ),
+      multiplier_min: Number(
+        options['adaptive_channel_routing_setting.multiplier_min'] || 0.5
+      ),
+      multiplier_max: Number(
+        options['adaptive_channel_routing_setting.multiplier_max'] || 1.5
       ),
     },
     channel_affinity_setting: {

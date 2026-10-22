@@ -114,7 +114,8 @@ func BuildRequestPolicy(options map[string]string) (*RequestPolicySnapshot, erro
 		}
 		if field, ok := strings.CutPrefix(key, "adaptive_channel_routing_setting."); ok {
 			switch field {
-			case "enabled", "window_minutes", "min_samples":
+			case "enabled", "window_minutes", "min_samples", "latency_mode",
+				"latency_exponent", "multiplier_min", "multiplier_max":
 			default:
 				return nil, fmt.Errorf("unknown adaptive channel routing option: %s", key)
 			}
@@ -150,7 +151,12 @@ func BuildRequestPolicy(options map[string]string) (*RequestPolicySnapshot, erro
 	}
 	adaptiveJSON := map[string]json.RawMessage{}
 	for key, value := range adaptiveFields {
-		adaptiveJSON[key] = json.RawMessage(value)
+		if key == "latency_mode" {
+			encoded, _ := common.Marshal(value)
+			adaptiveJSON[key] = encoded
+		} else {
+			adaptiveJSON[key] = json.RawMessage(value)
+		}
 	}
 	encoded, err = common.Marshal(adaptiveJSON)
 	if err != nil {
@@ -165,6 +171,23 @@ func BuildRequestPolicy(options map[string]string) (*RequestPolicySnapshot, erro
 	}
 	if adaptiveSetting.MinSamples < 1 || adaptiveSetting.MinSamples > 10000 {
 		return nil, fmt.Errorf("adaptive scoring minimum samples must be between 1 and 10000")
+	}
+	switch adaptiveSetting.LatencyMode {
+	case "", operation_setting.AdaptiveLatencyModeAbsolute, operation_setting.AdaptiveLatencyModeRatio:
+	default:
+		return nil, fmt.Errorf("adaptive latency mode must be absolute or ratio")
+	}
+	if adaptiveSetting.LatencyExponent < 0.1 || adaptiveSetting.LatencyExponent > 10 {
+		return nil, fmt.Errorf("adaptive latency exponent must be between 0.1 and 10")
+	}
+	if adaptiveSetting.MultiplierMin < 0 || adaptiveSetting.MultiplierMin > 1 {
+		return nil, fmt.Errorf("adaptive multiplier minimum must be between 0 and 1")
+	}
+	if adaptiveSetting.MultiplierMax < 1 || adaptiveSetting.MultiplierMax > 10 {
+		return nil, fmt.Errorf("adaptive multiplier maximum must be between 1 and 10")
+	}
+	if adaptiveSetting.MultiplierMax < adaptiveSetting.MultiplierMin {
+		return nil, fmt.Errorf("adaptive multiplier maximum must not be below the minimum")
 	}
 	retryFailoverJSON := map[string]json.RawMessage{}
 	for key, value := range retryFailoverFields {

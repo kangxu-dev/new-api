@@ -1,6 +1,7 @@
 package service
 
 import (
+	"net/http"
 	"strconv"
 	"testing"
 	"time"
@@ -63,15 +64,137 @@ func TestAdaptiveChannelScoringLeavesUnderSampledAndDisabledChannelsNeutral(t *t
 
 func setAdaptiveChannelRoutingSetting(t *testing.T, setting operation_setting.AdaptiveChannelRoutingSetting) {
 	t.Helper()
+	values := map[string]string{
+		"enabled":        strconv.FormatBool(setting.Enabled),
+		"window_minutes": strconv.Itoa(setting.WindowMinutes),
+		"min_samples":    strconv.Itoa(setting.MinSamples),
+	}
+	if setting.LatencyMode != "" {
+		values["latency_mode"] = setting.LatencyMode
+	}
+	if setting.LatencyExponent > 0 {
+		values["latency_exponent"] = strconv.FormatFloat(setting.LatencyExponent, 'f', -1, 64)
+	}
+	if setting.MultiplierMin > 0 {
+		values["multiplier_min"] = strconv.FormatFloat(setting.MultiplierMin, 'f', -1, 64)
+	}
+	if setting.MultiplierMax > 0 {
+		values["multiplier_max"] = strconv.FormatFloat(setting.MultiplierMax, 'f', -1, 64)
+	}
 	err := config.UpdateConfigFromMap(
 		config.GlobalConfig.Get("adaptive_channel_routing_setting"),
-		map[string]string{
-			"enabled":        strconv.FormatBool(setting.Enabled),
-			"window_minutes": strconv.Itoa(setting.WindowMinutes),
-			"min_samples":    strconv.Itoa(setting.MinSamples),
-		},
+		values,
 	)
 	require.NoError(t, err)
+}
+
+// recordAdaptiveLatency feeds n successful observations with the given average
+// first byte, which is what the ratio score compares channels on.
+func recordAdaptiveLatency(t *testing.T, group, model string, channelID int, n int, firstByteMs int64) {
+	t.Helper()
+	for range n {
+		RecordAdaptiveChannelOutcome(group, model, channelID, http.StatusOK, true, firstByteMs, true)
+	}
+}
+
+func resetAdaptiveWindows(t *testing.T) {
+	t.Helper()
+	adaptiveChannelWindows.Lock()
+	adaptiveChannelWindows.windows = make(map[adaptiveChannelKey]*adaptiveChannelWindow)
+	adaptiveChannelWindows.lastPruneAt = 0
+	adaptiveChannelWindows.Unlock()
+}
+
+func TestAdaptiveRatioModePrefersTheFasterChannel(t *testing.T) {
+	previous := operation_setting.GetAdaptiveChannelRoutingSetting()
+	t.Cleanup(func() { setAdaptiveChannelRoutingSetting(t, previous) })
+	resetAdaptiveWindows(t)
+	setAdaptiveChannelRoutingSetting(t, operation_setting.AdaptiveChannelRoutingSetting{
+		Enabled: true, WindowMinutes: 30, MinSamples: 2,
+		LatencyMode: operation_setting.AdaptiveLatencyModeRatio, LatencyExponent: 2,
+		MultiplierMin: 0.5, MultiplierMax: 1.5,
+	})
+
+	// The production numbers that motivated this mode: 6233ms vs 7638ms, an 18%
+	// gap that the legacy absolute curve turned into a 0.3% traffic difference.
+	recordAdaptiveLatency(t, "codex", "gpt-test", 1, 10, 7638)
+	recordAdaptiveLatency(t, "codex", "gpt-test", 2, 10, 6233)
+
+	multipliers := AdaptiveChannelWeightMultipliers("codex", "gpt-test")
+	require.Len(t, multipliers, 2)
+
+	// The fastest channel takes the top of the band; the slower one falls off as
+	// (6233/7638)^2 = 0.666 of it.
+	assert.InDelta(t, 1.5, multipliers[2], 0.001, "the fastest channel reaches the top of the band")
+	assert.InDelta(t, 1.5*0.666, multipliers[1], 0.01)
+
+	share := multipliers[2] / (multipliers[1] + multipliers[2])
+	assert.InDelta(t, 0.60, share, 0.01, "an 18% first-byte advantage should be worth about 60/40, not 50/50")
+}
+
+func TestAdaptiveRatioModeLetsErrorsWeighAgainstSpeed(t *testing.T) {
+	previous := operation_setting.GetAdaptiveChannelRoutingSetting()
+	t.Cleanup(func() { setAdaptiveChannelRoutingSetting(t, previous) })
+	resetAdaptiveWindows(t)
+	setAdaptiveChannelRoutingSetting(t, operation_setting.AdaptiveChannelRoutingSetting{
+		Enabled: true, WindowMinutes: 30, MinSamples: 2,
+		LatencyMode: operation_setting.AdaptiveLatencyModeRatio, LatencyExponent: 2,
+		MultiplierMin: 0.5, MultiplierMax: 1.5,
+	})
+
+	// Same latency on both, but channel 1 fails a quarter of its requests. The
+	// error term multiplies the latency term, so the failing channel is
+	// deprioritised by exactly its health factor.
+	recordAdaptiveLatency(t, "codex", "gpt-test", 1, 30, 2000)
+	for range 10 {
+		RecordAdaptiveChannelOutcome("codex", "gpt-test", 1, http.StatusInternalServerError, false, 0, false)
+	}
+	recordAdaptiveLatency(t, "codex", "gpt-test", 2, 40, 2000)
+
+	multipliers := AdaptiveChannelWeightMultipliers("codex", "gpt-test")
+	require.Len(t, multipliers, 2)
+	assert.InDelta(t, 1.5, multipliers[2], 0.001, "the flawless channel reaches the top of the band")
+	assert.InDelta(t, 1.5*0.75, multipliers[1], 0.001, "a 25% failure rate costs a quarter of the weight")
+}
+
+func TestAdaptiveRatioModeClampsToTheConfiguredBand(t *testing.T) {
+	previous := operation_setting.GetAdaptiveChannelRoutingSetting()
+	t.Cleanup(func() { setAdaptiveChannelRoutingSetting(t, previous) })
+	resetAdaptiveWindows(t)
+	setAdaptiveChannelRoutingSetting(t, operation_setting.AdaptiveChannelRoutingSetting{
+		Enabled: true, WindowMinutes: 30, MinSamples: 2,
+		LatencyMode: operation_setting.AdaptiveLatencyModeRatio, LatencyExponent: 4,
+		MultiplierMin: 0.2, MultiplierMax: 1.8,
+	})
+
+	// A 10x latency gap with exponent 4 would score 1e-4 of the best channel; the
+	// band has to hold it up rather than let the channel starve.
+	recordAdaptiveLatency(t, "codex", "gpt-test", 1, 5, 1000)
+	recordAdaptiveLatency(t, "codex", "gpt-test", 2, 5, 10000)
+
+	multipliers := AdaptiveChannelWeightMultipliers("codex", "gpt-test")
+	require.Len(t, multipliers, 2)
+	assert.InDelta(t, 1.8, multipliers[1], 0.001)
+	assert.InDelta(t, 0.2, multipliers[2], 0.001, "the clamp keeps a slow channel from being starved entirely")
+}
+
+func TestAdaptiveRatioModeStaysNeutralWithoutLatencySamples(t *testing.T) {
+	previous := operation_setting.GetAdaptiveChannelRoutingSetting()
+	t.Cleanup(func() { setAdaptiveChannelRoutingSetting(t, previous) })
+	resetAdaptiveWindows(t)
+	setAdaptiveChannelRoutingSetting(t, operation_setting.AdaptiveChannelRoutingSetting{
+		Enabled: true, WindowMinutes: 30, MinSamples: 2,
+		LatencyMode: operation_setting.AdaptiveLatencyModeRatio, LatencyExponent: 2,
+		MultiplierMin: 0.5, MultiplierMax: 1.5,
+	})
+
+	// Both channels only ever produced failures, so there is no latency to rank
+	// on. The score must not invent a preference.
+	for range 5 {
+		RecordAdaptiveChannelOutcome("codex", "gpt-test", 1, http.StatusInternalServerError, false, 0, false)
+		RecordAdaptiveChannelOutcome("codex", "gpt-test", 2, http.StatusInternalServerError, false, 0, false)
+	}
+	assert.Nil(t, AdaptiveChannelWeightMultipliers("codex", "gpt-test"))
 }
 
 func TestAdaptiveChannelScorePenalizesServerErrorsAndSlowFirstByte(t *testing.T) {
