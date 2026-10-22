@@ -2,6 +2,8 @@ package service
 
 import (
 	"math"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -96,6 +98,40 @@ func (a adaptiveChannelAggregate) avgFirstByteMs() float64 {
 	return float64(a.firstByteTotal) / float64(a.firstByteSamples)
 }
 
+// aggregate sums the buckets that fall inside [cutoff, minute].
+func (w *adaptiveChannelWindow) aggregate(channelID int, cutoff, minute int64) adaptiveChannelAggregate {
+	agg := adaptiveChannelAggregate{channelID: channelID}
+	for _, bucket := range w.buckets {
+		if bucket.minute < cutoff || bucket.minute > minute {
+			continue
+		}
+		agg.requests += bucket.requests
+		agg.successes += bucket.successes
+		agg.serverErrors += bucket.serverErrors
+		agg.firstByteTotal += bucket.firstByteTotal
+		agg.firstByteSamples += bucket.firstByteSample
+	}
+	return agg
+}
+
+// adaptiveChannelWeightMultipliers turns window totals into weight multipliers,
+// dispatching on the configured latency mode.
+func adaptiveChannelWeightMultipliers(setting operation_setting.AdaptiveChannelRoutingSetting, aggregates []adaptiveChannelAggregate) map[int]float64 {
+	if len(aggregates) == 0 {
+		return nil
+	}
+	if setting.LatencyMode == operation_setting.AdaptiveLatencyModeRatio {
+		return adaptiveChannelRatioMultipliers(setting, aggregates)
+	}
+
+	result := make(map[int]float64, len(aggregates))
+	for _, agg := range aggregates {
+		score := adaptiveChannelScore(agg.requests, agg.successes, agg.serverErrors, agg.firstByteTotal, agg.firstByteSamples)
+		result[agg.channelID] = 0.5 + score/100
+	}
+	return result
+}
+
 // AdaptiveChannelWeightMultipliers returns neutral-to-bounded multipliers for
 // channels with enough recent observations. Static priority tiers stay intact.
 func AdaptiveChannelWeightMultipliers(group, model string) map[int]float64 {
@@ -113,17 +149,7 @@ func AdaptiveChannelWeightMultipliers(group, model string) map[int]float64 {
 		if key.group != group || key.model != model {
 			continue
 		}
-		agg := adaptiveChannelAggregate{channelID: key.channelID}
-		for _, bucket := range window.buckets {
-			if bucket.minute < cutoff || bucket.minute > minute {
-				continue
-			}
-			agg.requests += bucket.requests
-			agg.successes += bucket.successes
-			agg.serverErrors += bucket.serverErrors
-			agg.firstByteTotal += bucket.firstByteTotal
-			agg.firstByteSamples += bucket.firstByteSample
-		}
+		agg := window.aggregate(key.channelID, cutoff, minute)
 		if agg.requests < int64(setting.MinSamples) {
 			continue
 		}
@@ -131,19 +157,7 @@ func AdaptiveChannelWeightMultipliers(group, model string) map[int]float64 {
 	}
 	adaptiveChannelWindows.RUnlock()
 
-	if len(aggregates) == 0 {
-		return nil
-	}
-	if setting.LatencyMode == operation_setting.AdaptiveLatencyModeRatio {
-		return adaptiveChannelRatioMultipliers(setting, aggregates)
-	}
-
-	result := make(map[int]float64, len(aggregates))
-	for _, agg := range aggregates {
-		score := adaptiveChannelScore(agg.requests, agg.successes, agg.serverErrors, agg.firstByteTotal, agg.firstByteSamples)
-		result[agg.channelID] = 0.5 + score/100
-	}
-	return result
+	return adaptiveChannelWeightMultipliers(setting, aggregates)
 }
 
 // adaptiveChannelRatioMultipliers scores each channel against the fastest one
@@ -213,4 +227,86 @@ func adaptiveChannelScore(requests, successes, serverErrors, firstByteTotal, fir
 		score = score*0.8 + firstByteScore*0.2
 	}
 	return max(0, min(100, score))
+}
+
+// AdaptiveChannelScoreSnapshot is one channel's current routing input, exactly
+// as the selector sees it.
+type AdaptiveChannelScoreSnapshot struct {
+	ChannelID int `json:"channel_id"`
+	// ChannelName is filled by the API layer, which has the channel cache.
+	ChannelName    string  `json:"channel_name"`
+	Requests       int64   `json:"requests"`
+	Successes      int64   `json:"successes"`
+	ServerErrors   int64   `json:"server_errors"`
+	AvgFirstByteMs float64 `json:"avg_first_byte_ms"`
+	// Scored reports whether this channel reached MinSamples inside the window
+	// and therefore carries a multiplier. An unscored channel keeps its
+	// configured weight, which is why an inert score looks like no score at all.
+	Scored     bool    `json:"scored"`
+	Multiplier float64 `json:"multiplier"`
+}
+
+// AdaptiveChannelScoreGroup is the score state for one group and model.
+type AdaptiveChannelScoreGroup struct {
+	Group    string                         `json:"group"`
+	Model    string                         `json:"model"`
+	Channels []AdaptiveChannelScoreSnapshot `json:"channels"`
+}
+
+// SnapshotAdaptiveChannelScores reports what the score currently holds for every
+// group and model it has seen. The multiplier is otherwise invisible, which
+// makes "the score is not applying" and "the score is applying but the channels
+// are equally good" indistinguishable from the outside.
+func SnapshotAdaptiveChannelScores() []AdaptiveChannelScoreGroup {
+	setting := operation_setting.GetAdaptiveChannelRoutingSetting()
+	minute := time.Now().Unix() / 60
+	cutoff := minute - int64(setting.WindowMinutes-1)
+
+	type groupModel struct{ group, model string }
+	grouped := make(map[groupModel][]adaptiveChannelAggregate)
+
+	adaptiveChannelWindows.RLock()
+	for key, window := range adaptiveChannelWindows.windows {
+		gm := groupModel{key.group, key.model}
+		grouped[gm] = append(grouped[gm], window.aggregate(key.channelID, cutoff, minute))
+	}
+	adaptiveChannelWindows.RUnlock()
+
+	reports := make([]AdaptiveChannelScoreGroup, 0, len(grouped))
+	for gm, all := range grouped {
+		scored := make([]adaptiveChannelAggregate, 0, len(all))
+		for _, agg := range all {
+			if agg.requests >= int64(setting.MinSamples) {
+				scored = append(scored, agg)
+			}
+		}
+		multipliers := adaptiveChannelWeightMultipliers(setting, scored)
+
+		report := AdaptiveChannelScoreGroup{Group: gm.group, Model: gm.model}
+		for _, agg := range all {
+			snapshot := AdaptiveChannelScoreSnapshot{
+				ChannelID:      agg.channelID,
+				Requests:       agg.requests,
+				Successes:      agg.successes,
+				ServerErrors:   agg.serverErrors,
+				AvgFirstByteMs: agg.avgFirstByteMs(),
+			}
+			if multiplier, ok := multipliers[agg.channelID]; ok {
+				snapshot.Scored = true
+				snapshot.Multiplier = multiplier
+			}
+			report.Channels = append(report.Channels, snapshot)
+		}
+		slices.SortFunc(report.Channels, func(a, b AdaptiveChannelScoreSnapshot) int {
+			return a.ChannelID - b.ChannelID
+		})
+		reports = append(reports, report)
+	}
+	slices.SortFunc(reports, func(a, b AdaptiveChannelScoreGroup) int {
+		if a.Group != b.Group {
+			return strings.Compare(a.Group, b.Group)
+		}
+		return strings.Compare(a.Model, b.Model)
+	})
+	return reports
 }

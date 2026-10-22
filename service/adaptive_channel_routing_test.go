@@ -217,3 +217,40 @@ func TestAdaptiveChannelScorePenalizesServerErrorsAndSlowFirstByte(t *testing.T)
 		assert.LessOrEqual(t, score, 100.0)
 	}
 }
+
+func TestSnapshotAdaptiveChannelScoresMarksUnscoredChannels(t *testing.T) {
+	previous := operation_setting.GetAdaptiveChannelRoutingSetting()
+	t.Cleanup(func() { setAdaptiveChannelRoutingSetting(t, previous) })
+	resetAdaptiveWindows(t)
+	setAdaptiveChannelRoutingSetting(t, operation_setting.AdaptiveChannelRoutingSetting{
+		Enabled: true, WindowMinutes: 30, MinSamples: 5,
+		LatencyMode: operation_setting.AdaptiveLatencyModeRatio, LatencyExponent: 2,
+		MultiplierMin: 0.5, MultiplierMax: 1.5,
+	})
+
+	// Channel 1 clears the sample threshold, channel 2 does not. The snapshot has
+	// to say which is which: an unscored channel silently keeps its configured
+	// weight, which is indistinguishable from a score that is not running.
+	recordAdaptiveLatency(t, "codex", "gpt-test", 1, 6, 1000)
+	recordAdaptiveLatency(t, "codex", "gpt-test", 2, 2, 500)
+
+	reports := SnapshotAdaptiveChannelScores()
+	require.Len(t, reports, 1)
+	assert.Equal(t, "codex", reports[0].Group)
+	assert.Equal(t, "gpt-test", reports[0].Model)
+	require.Len(t, reports[0].Channels, 2)
+
+	byID := make(map[int]AdaptiveChannelScoreSnapshot, 2)
+	for _, channel := range reports[0].Channels {
+		byID[channel.ChannelID] = channel
+	}
+
+	assert.True(t, byID[1].Scored)
+	assert.InDelta(t, 1.5, byID[1].Multiplier, 0.001)
+	assert.EqualValues(t, 6, byID[1].Requests)
+	assert.InDelta(t, 1000, byID[1].AvgFirstByteMs, 0.001)
+
+	assert.False(t, byID[2].Scored, "a channel below the sample threshold carries no multiplier")
+	assert.Zero(t, byID[2].Multiplier)
+	assert.EqualValues(t, 2, byID[2].Requests, "its raw counts are still reported")
+}
