@@ -21,10 +21,17 @@ import { memo } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { GroupBadge } from '@/components/group-badge'
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
 
 import { CHANNEL_STATUS } from '../constants'
 import { isTagAggregateRow, parseGroupsList } from '../lib'
+import { formatScoreMultiplier } from '../lib/adaptive-score'
 import type { Channel } from '../types'
 import { ChannelRowActionsLayoutContext } from './channel-row-actions-context'
 import { useChannels } from './channels-provider'
@@ -47,7 +54,7 @@ function ChannelCardComponent({
   isSelected: boolean
 }) {
   const { t } = useTranslation()
-  const { sensitiveVisible } = useChannels()
+  const { sensitiveVisible, channelScores, adaptiveScoreEnabled } = useChannels()
   const isTagRow = isTagAggregateRow(row.original)
   const cells = row.getAllCells()
 
@@ -66,6 +73,7 @@ function ChannelCardComponent({
   }
 
   const groups = parseGroupsList(row.original.group ?? '')
+  const scoreSummary = channelScores.get(row.original.id)
 
   const selectCell = renderCell('select')
   const typeCell = renderCell('type')
@@ -156,22 +164,86 @@ function ChannelCardComponent({
           </div>
         </div>
 
-        {/* Last row: groups span the full width, showing every group (no label) */}
-        <div className='min-w-0'>
-          {groups.length > 0 ? (
-            <div className='-ml-1.5 flex flex-wrap gap-1'>
-              {groups.map((g) => (
-                <GroupBadge
-                  key={g}
-                  group={g}
-                  label={sensitiveVisible ? undefined : SENSITIVE_MASK}
-                  size='sm'
-                />
-              ))}
+        {/* Last row: groups on the left, adaptive score on the right. */}
+        <div className='flex items-end justify-between gap-3'>
+          <div className='min-w-0 flex-1'>
+            {groups.length > 0 ? (
+              <div className='-ml-1.5 flex flex-wrap gap-1'>
+                {groups.map((g) => (
+                  <GroupBadge
+                    key={g}
+                    group={g}
+                    label={sensitiveVisible ? undefined : SENSITIVE_MASK}
+                    size='sm'
+                  />
+                ))}
+              </div>
+            ) : (
+              <span className='text-muted-foreground text-sm'>-</span>
+            )}
+          </div>
+          {!isTagRow && adaptiveScoreEnabled ? (
+            <div className='flex shrink-0 items-center gap-1.5'>
+              <span className={labelClass}>{t('Adaptive score')}</span>
+              {scoreSummary?.scored ? (
+                <TooltipProvider>
+                  <Tooltip>
+                    <TooltipTrigger
+                      render={
+                        <span className='cursor-help tabular-nums text-sm'>
+                          {formatScoreMultiplier(scoreSummary.multiplier)}
+                        </span>
+                      }
+                    />
+                    <TooltipContent>
+                      <div className='space-y-1'>
+                        <p className='font-medium'>{t('Adaptive score')}</p>
+                        {scoreSummary.entries.map((entry) => (
+                          <p key={`${entry.group}/${entry.model}`}>
+                            {`${entry.group} · ${entry.model}: `}
+                            {entry.scored
+                              ? t(
+                                  '{{multiplier}} · {{latency}}ms · {{samples}} samples · {{errors}} errors',
+                                  {
+                                    multiplier: formatScoreMultiplier(
+                                      entry.multiplier
+                                    ),
+                                    latency: Math.round(entry.avgFirstByteMs),
+                                    samples: entry.requests,
+                                    errors: entry.serverErrors,
+                                  }
+                                )
+                              : t(
+                                  'Below the sample threshold; keeps its configured weight'
+                                )}
+                          </p>
+                        ))}
+                      </div>
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
+              ) : (
+                <TooltipProvider>
+                  <Tooltip>
+                    <TooltipTrigger
+                      render={
+                        <span className='text-muted-foreground cursor-help text-sm'>
+                          -
+                        </span>
+                      }
+                    />
+                    <TooltipContent>
+                      <p>
+                        {t(
+                          'No channel here reached the sample threshold in the scoring window, so the score is not affecting routing.'
+                        )}
+                      </p>
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
+              )}
             </div>
-          ) : (
-            <span className='text-muted-foreground text-sm'>-</span>
-          )}
+          ) : null}
         </div>
       </div>
     </ChannelRowActionsLayoutContext.Provider>

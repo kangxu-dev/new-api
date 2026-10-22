@@ -53,6 +53,7 @@ export const channelsQueryKeys = {
   lists: () => [...channelsQueryKeys.all, 'list'] as const,
   list: (params: Record<string, unknown>) =>
     [...channelsQueryKeys.lists(), params] as const,
+  adaptiveScores: () => [...channelsQueryKeys.all, 'adaptive_scores'] as const,
   details: () => [...channelsQueryKeys.all, 'detail'] as const,
   detail: (id: number) => [...channelsQueryKeys.details(), id] as const,
 }

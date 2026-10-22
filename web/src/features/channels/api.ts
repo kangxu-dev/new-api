@@ -22,6 +22,7 @@ import { requireServerSuccess } from '@/lib/server-error-message'
 
 import type { InferenceStatus } from './lib/inference-status'
 import type {
+  AdaptiveChannelScoresResponse,
   AddChannelRequest,
   BatchDeleteParams,
   BatchSetTagParams,
@@ -697,4 +698,20 @@ export async function getPrefillGroups(
 }> {
   const res = await api.get('/api/prefill_group', { params: { type } })
   return res.data
+}
+
+export async function getAdaptiveChannelScores(
+  signal?: AbortSignal
+): Promise<AdaptiveChannelScoresResponse> {
+  const response = await api.get<{
+    success: boolean
+    data: AdaptiveChannelScoresResponse
+  }>('/api/option/adaptive_channel_scores', {
+    signal,
+    disableDuplicate: true,
+    // The endpoint is admin-only and the badge is decorative: a failure must not
+    // surface a toast on a page that otherwise works.
+    skipErrorHandler: true,
+  })
+  return requireServerSuccess(response.data).data
 }

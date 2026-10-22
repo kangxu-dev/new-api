@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 /* eslint-disable react-refresh/only-export-components */
-import { useQueryClient } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import React, {
   createContext,
   useContext,
@@ -28,7 +28,12 @@ import React, {
 
 import { useChannelUpstreamUpdates } from '../hooks/use-channel-upstream-updates'
 import { channelsQueryKeys } from '../lib'
+import {
+  summarizeChannelScores,
+  type ChannelScoreSummary,
+} from '../lib/adaptive-score'
 import type { Channel } from '../types'
+import { getAdaptiveChannelScores } from '../api'
 
 // ============================================================================
 // Types
@@ -66,6 +71,9 @@ type ChannelsContextType = {
   sensitiveVisible: boolean
   setSensitiveVisible: (visible: boolean) => void
   upstream: UpstreamUpdateState
+  /** Adaptive-routing score per channel, empty until the query resolves. */
+  channelScores: Map<number, ChannelScoreSummary>
+  adaptiveScoreEnabled: boolean
 }
 
 // ============================================================================
@@ -99,6 +107,20 @@ export function ChannelsProvider({ children }: { children: React.ReactNode }) {
   }, [queryClient])
   const upstream = useChannelUpstreamUpdates(refreshChannels)
 
+  // The score only changes as traffic arrives, so a slow poll is enough and
+  // keeps the channels page from hammering an admin endpoint.
+  const scoresQuery = useQuery({
+    queryKey: channelsQueryKeys.adaptiveScores(),
+    queryFn: ({ signal }) => getAdaptiveChannelScores(signal),
+    staleTime: 60_000,
+    refetchInterval: 60_000,
+    retry: false,
+  })
+  const channelScores = useMemo(
+    () => summarizeChannelScores(scoresQuery.data),
+    [scoresQuery.data]
+  )
+
   // useState setters are stable, so the context value only needs to change when
   // an actual state value changes. Memoizing avoids handing every consumer
   // (including all channel cards/cells) a brand-new object on each render.
@@ -119,6 +141,8 @@ export function ChannelsProvider({ children }: { children: React.ReactNode }) {
       sensitiveVisible,
       setSensitiveVisible,
       upstream,
+      channelScores,
+      adaptiveScoreEnabled: scoresQuery.data?.enabled ?? false,
     }),
     [
       open,
@@ -129,6 +153,8 @@ export function ChannelsProvider({ children }: { children: React.ReactNode }) {
       batchMode,
       sensitiveVisible,
       upstream,
+      channelScores,
+      scoresQuery.data?.enabled,
     ]
   )
 

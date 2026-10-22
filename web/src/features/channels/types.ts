@@ -386,3 +386,41 @@ export interface AddChannelRequest {
   batch_add_set_key_prefix_2_name?: boolean
   channel: Partial<Channel>
 }
+
+// ============================================================================
+// Adaptive routing score
+// ============================================================================
+
+/**
+ * One channel's current adaptive-routing input, as reported by
+ * `GET /api/option/adaptive_channel_scores`.
+ *
+ * `scored` is the important field: false means the channel did not reach
+ * `min_samples` inside the window, so it carries no multiplier and keeps its
+ * configured weight. That is otherwise indistinguishable from a score that is
+ * running but finds the channels equally good.
+ */
+export interface AdaptiveChannelScore {
+  channel_id: number
+  channel_name: string
+  requests: number
+  successes: number
+  server_errors: number
+  avg_first_byte_ms: number
+  scored: boolean
+  multiplier: number
+}
+
+export interface AdaptiveChannelScoreGroup {
+  group: string
+  model: string
+  channels: AdaptiveChannelScore[]
+}
+
+export interface AdaptiveChannelScoresResponse {
+  enabled: boolean
+  latency_mode: string
+  window_minutes: number
+  min_samples: number
+  groups: AdaptiveChannelScoreGroup[]
+}
