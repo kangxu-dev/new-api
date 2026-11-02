@@ -16,11 +16,12 @@ const (
 	SystemTaskStatusSucceeded SystemTaskStatus = "succeeded"
 	SystemTaskStatusFailed    SystemTaskStatus = "failed"
 
-	SystemTaskTypeLogCleanup     = "log_cleanup"
-	SystemTaskTypeChannelTest    = "channel_test"
-	SystemTaskTypeModelUpdate    = "model_update"
-	SystemTaskTypeMidjourneyPoll = "midjourney_poll"
-	SystemTaskTypeAsyncTaskPoll  = "async_task_poll"
+	SystemTaskTypeLogCleanup           = "log_cleanup"
+	SystemTaskTypeChannelTest          = "channel_test"
+	SystemTaskTypeModelUpdate          = "model_update"
+	SystemTaskTypeMidjourneyPoll       = "midjourney_poll"
+	SystemTaskTypeAsyncTaskPoll        = "async_task_poll"
+	SystemTaskTypeAdaptiveChannelProbe = "adaptive_channel_probe"
 )
 
 var ErrSystemTaskLockLost = errors.New("system task lock lost")
@@ -238,6 +239,23 @@ func DeleteSystemTaskHistory(filter SystemTaskFilter) (int64, error) {
 func GetLatestSystemTask(taskType string) (*SystemTask, error) {
 	var task SystemTask
 	err := DB.Where("type = ?", taskType).Order("id desc").First(&task).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &task, nil
+}
+
+// GetLatestFinishedSystemTask returns the newest completed row that carries a
+// result. Adaptive probe state is persisted there; a currently running row has
+// an empty result and must not hide the previous snapshot.
+func GetLatestFinishedSystemTask(taskType string) (*SystemTask, error) {
+	var task SystemTask
+	err := DB.Where("type = ? AND status IN ? AND result <> ''", taskType, []SystemTaskStatus{SystemTaskStatusSucceeded, SystemTaskStatusFailed}).
+		Order("id desc").
+		First(&task).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, nil

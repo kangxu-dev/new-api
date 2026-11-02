@@ -6,6 +6,7 @@ import (
 	"math"
 	"os"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
@@ -77,17 +78,96 @@ func TestRequestPolicyDatabaseMatrix(t *testing.T) {
 			rules := `[{"name":"session","model_regex":[".*"],"key_sources":[{"type":"request_header","key":"X-Session"}],"ttl_seconds":0,"skip_retry_on_failure":false,"include_using_group":false,"param_override_template":{"temperature":0},"future_field":{"enabled":false}}]`
 			require.NoError(t, UpdateRequestPolicyOptions(map[string]string{
 				"RetryTimes": "2", "channel_affinity_setting.rules": rules,
-				"adaptive_channel_routing_setting.enabled": "true",
+				"adaptive_channel_routing_setting.enabled":        "true",
 				"adaptive_channel_routing_setting.window_minutes": "15",
-				"adaptive_channel_routing_setting.min_samples": "20",
+				"adaptive_channel_routing_setting.min_samples":    "20",
 			}))
 			assert.Equal(t, 2, CurrentRequestPolicy().RetryTimes)
 			assert.Equal(t, 2, common.RetryTimes, "the runtime global follows the same write")
 			assert.Equal(t, "15", CurrentRequestPolicy().Options["adaptive_channel_routing_setting.window_minutes"])
+			assert.Equal(t, "60", CurrentRequestPolicy().Options["adaptive_channel_routing_setting.probe_interval_seconds"], "an old option set gets the probe defaults")
+			assert.Equal(t, "false", CurrentRequestPolicy().Options["adaptive_channel_routing_setting.probe_enabled"])
+			assert.Equal(t, "false", CurrentRequestPolicy().Options["adaptive_channel_routing_setting.probe_schedule_enabled"])
+			var defaultDays []int
+			require.NoError(t, common.UnmarshalJsonStr(CurrentRequestPolicy().Options["adaptive_channel_routing_setting.probe_schedule_days"], &defaultDays))
+			assert.Equal(t, []int{1, 2, 3, 4, 5, 6, 7}, defaultDays)
+			assert.Equal(t, "09:00", CurrentRequestPolicy().Options["adaptive_channel_routing_setting.probe_schedule_start"])
+			assert.Equal(t, "23:00", CurrentRequestPolicy().Options["adaptive_channel_routing_setting.probe_schedule_end"])
+			require.NoError(t, UpdateRequestPolicyOptions(map[string]string{
+				"adaptive_channel_routing_setting.probe_enabled":           "true",
+				"adaptive_channel_routing_setting.probe_model":             "probe-model",
+				"adaptive_channel_routing_setting.probe_interval_seconds":  "120",
+				"adaptive_channel_routing_setting.probe_max_requests":      "8",
+				"adaptive_channel_routing_setting.probe_max_output_tokens": "32",
+			}))
+			probeSnapshot := CurrentRequestPolicy()
+			assert.Equal(t, "true", probeSnapshot.Options["adaptive_channel_routing_setting.probe_enabled"])
+			assert.Equal(t, "probe-model", probeSnapshot.Options["adaptive_channel_routing_setting.probe_model"])
+			assert.Equal(t, "120", probeSnapshot.Options["adaptive_channel_routing_setting.probe_interval_seconds"])
+			assert.Equal(t, "8", probeSnapshot.Options["adaptive_channel_routing_setting.probe_max_requests"])
+			assert.Equal(t, "32", probeSnapshot.Options["adaptive_channel_routing_setting.probe_max_output_tokens"])
+			require.NoError(t, UpdateRequestPolicyOptions(map[string]string{
+				"adaptive_channel_routing_setting.probe_schedule_enabled": "true",
+				"adaptive_channel_routing_setting.probe_schedule_days":    "[1,3,7]",
+				"adaptive_channel_routing_setting.probe_schedule_start":   "22:00",
+				"adaptive_channel_routing_setting.probe_schedule_end":     "02:00",
+			}))
+			var configuredDays []int
+			require.NoError(t, common.UnmarshalJsonStr(CurrentRequestPolicy().Options["adaptive_channel_routing_setting.probe_schedule_days"], &configuredDays))
+			assert.Equal(t, []int{1, 3, 7}, configuredDays)
+			assert.Equal(t, "true", CurrentRequestPolicy().Options["adaptive_channel_routing_setting.probe_schedule_enabled"])
+			assert.Equal(t, "22:00", CurrentRequestPolicy().Options["adaptive_channel_routing_setting.probe_schedule_start"])
+			assert.Equal(t, "02:00", CurrentRequestPolicy().Options["adaptive_channel_routing_setting.probe_schedule_end"])
+			loadOptionsFromDatabase()
+			loadOptionsFromDatabase()
+			assert.Equal(t, []int{1, 3, 7}, operation_setting.GetAdaptiveChannelRoutingSetting().ProbeScheduleDays)
+			assert.Equal(t, "22:00", operation_setting.GetAdaptiveChannelRoutingSetting().ProbeScheduleStart)
+			assert.Equal(t, "02:00", operation_setting.GetAdaptiveChannelRoutingSetting().ProbeScheduleEnd)
 			for _, value := range []string{"0", "61", "bad"} {
 				assert.Error(t, UpdateRequestPolicyOptions(map[string]string{"adaptive_channel_routing_setting.window_minutes": value}))
 			}
 			assert.Error(t, UpdateRequestPolicyOptions(map[string]string{"adaptive_channel_routing_setting.min_samples": "10001"}))
+			for _, invalid := range []map[string]string{
+				{"adaptive_channel_routing_setting.probe_model": ""},
+				{"adaptive_channel_routing_setting.probe_model": strings.Repeat("x", 129)},
+				{"adaptive_channel_routing_setting.probe_model": "bad\u0000name"},
+				{"adaptive_channel_routing_setting.probe_interval_seconds": "29"},
+				{"adaptive_channel_routing_setting.probe_interval_seconds": "3601"},
+				{"adaptive_channel_routing_setting.probe_max_requests": "0"},
+				{"adaptive_channel_routing_setting.probe_max_requests": "101"},
+				{"adaptive_channel_routing_setting.probe_max_output_tokens": "0"},
+				{"adaptive_channel_routing_setting.probe_max_output_tokens": "1025"},
+				{"adaptive_channel_routing_setting.probe_schedule_days": "[]"},
+				{"adaptive_channel_routing_setting.probe_schedule_days": "[0]"},
+				{"adaptive_channel_routing_setting.probe_schedule_days": "[8]"},
+				{"adaptive_channel_routing_setting.probe_schedule_days": "[1,1]"},
+				{"adaptive_channel_routing_setting.probe_schedule_days": "[1,1.5]"},
+				{"adaptive_channel_routing_setting.probe_schedule_days": "null"},
+				{"adaptive_channel_routing_setting.probe_schedule_start": "9:00"},
+				{"adaptive_channel_routing_setting.probe_schedule_start": "24:00"},
+				{"adaptive_channel_routing_setting.probe_schedule_start": "09:60"},
+				{"adaptive_channel_routing_setting.probe_schedule_start": "09:0"},
+				{"adaptive_channel_routing_setting.probe_schedule_start": "09:00", "adaptive_channel_routing_setting.probe_schedule_end": "09:00"},
+				{"adaptive_channel_routing_setting.probe_schedule_start": "", "adaptive_channel_routing_setting.probe_schedule_end": ""},
+				{"adaptive_channel_routing_setting.probe_schedule_enabled": "false", "adaptive_channel_routing_setting.probe_schedule_start": "bad", "adaptive_channel_routing_setting.probe_schedule_end": ""},
+			} {
+				assert.Error(t, UpdateRequestPolicyOptions(invalid))
+			}
+			assert.Equal(t, "probe-model", CurrentRequestPolicy().Options["adaptive_channel_routing_setting.probe_model"], "a rejected probe option does not partially write")
+			assert.Equal(t, "[1,3,7]", CurrentRequestPolicy().Options["adaptive_channel_routing_setting.probe_schedule_days"])
+			require.NoError(t, UpdateRequestPolicyOptions(map[string]string{
+				"adaptive_channel_routing_setting.probe_schedule_enabled": "false",
+				"adaptive_channel_routing_setting.probe_schedule_start":   "",
+				"adaptive_channel_routing_setting.probe_schedule_end":     "",
+			}))
+			assert.Equal(t, "false", CurrentRequestPolicy().Options["adaptive_channel_routing_setting.probe_schedule_enabled"])
+			assert.Equal(t, "", CurrentRequestPolicy().Options["adaptive_channel_routing_setting.probe_schedule_start"])
+			assert.Equal(t, "", CurrentRequestPolicy().Options["adaptive_channel_routing_setting.probe_schedule_end"])
+			require.NoError(t, UpdateRequestPolicyOptions(map[string]string{"adaptive_channel_routing_setting.probe_model": "  probe-model  "}))
+			assert.Equal(t, "probe-model", CurrentRequestPolicy().Options["adaptive_channel_routing_setting.probe_model"], "the stored string is trimmed consistently")
+			var persistedProbe Option
+			require.NoError(t, db.Where(map[string]any{"key": "adaptive_channel_routing_setting.probe_model"}).First(&persistedProbe).Error)
+			assert.Equal(t, "probe-model", persistedProbe.Value)
 			require.NoError(t, UpdateOption("AutomaticRetryStatusCodes", "429,500-503"))
 			assert.Equal(t, "429,500-503", CurrentRequestPolicy().Options["AutomaticRetryStatusCodes"])
 			assert.Equal(t, "429,500-503", operation_setting.AutomaticRetryStatusCodesToString())

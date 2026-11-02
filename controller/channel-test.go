@@ -39,6 +39,59 @@ type testResult struct {
 	context     *gin.Context
 	localErr    error
 	newAPIError *types.NewAPIError
+	// firstByteAt is when the first upstream response payload arrived, matching
+	// the live relay's TTFT definition. firstByteMs is derived from it.
+	firstByteAt        time.Time
+	firstByteMs        int64
+	hasFirstByte       bool
+	upstreamStatusCode int
+}
+
+// channelTestProbeOptions marks a test as an adaptive-routing probe. Probes
+// must stay cheap and identifiable; ordinary manual and scheduled tests leave
+// this nil and keep their existing request size and behavior.
+type channelTestProbeOptions struct {
+	MaxOutputTokens int
+	LogLabel        string
+	// Group is the channel group used for the probe's price and log context.
+	// Probes do not use the root user's own group, which may not match the
+	// channel they are testing.
+	Group string
+}
+
+type channelTestOptions struct {
+	Probe *channelTestProbeOptions
+}
+
+// probeStreamCapture observes the upstream body as the existing adaptor reads
+// it. The bounded copy lets the probe verify that the upstream actually
+// reported usage instead of trusting a locally estimated fallback.
+type probeStreamCapture struct {
+	body     io.ReadCloser
+	limit    int64
+	mu       sync.Mutex
+	captured bytes.Buffer
+}
+
+func (c *probeStreamCapture) Read(p []byte) (int, error) {
+	n, err := c.body.Read(p)
+	if n > 0 {
+		c.mu.Lock()
+		if remaining := c.limit - int64(c.captured.Len()); remaining > 0 {
+			writeLen := min(int64(n), remaining)
+			_, _ = c.captured.Write(p[:writeLen])
+		}
+		c.mu.Unlock()
+	}
+	return n, err
+}
+
+func (c *probeStreamCapture) Close() error { return c.body.Close() }
+
+func (c *probeStreamCapture) Body() []byte {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return bytes.Clone(c.captured.Bytes())
 }
 
 func normalizeChannelTestEndpoint(channel *model.Channel, endpointType string) string {
@@ -69,21 +122,26 @@ func resolveChannelTestUserID(c *gin.Context) (int, error) {
 	return rootUser.Id, nil
 }
 
+var unsupportedTestChannelTypes = []int{
+	constant.ChannelTypeMidjourney,
+	constant.ChannelTypeMidjourneyPlus,
+	constant.ChannelTypeSunoAPI,
+	constant.ChannelTypeKling,
+	constant.ChannelTypeJimeng,
+	constant.ChannelTypeDoubaoVideo,
+	constant.ChannelTypeVidu,
+	constant.ChannelTypeTaskPlugin,
+}
+
 func testChannel(ctx context.Context, channel *model.Channel, testUserID int, testModel string, endpointType string, isStream bool) testResult {
+	return testChannelWithOptions(ctx, channel, testUserID, testModel, endpointType, isStream, channelTestOptions{})
+}
+
+func testChannelWithOptions(ctx context.Context, channel *model.Channel, testUserID int, testModel string, endpointType string, isStream bool, options channelTestOptions) testResult {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	tik := time.Now()
-	var unsupportedTestChannelTypes = []int{
-		constant.ChannelTypeMidjourney,
-		constant.ChannelTypeMidjourneyPlus,
-		constant.ChannelTypeSunoAPI,
-		constant.ChannelTypeKling,
-		constant.ChannelTypeJimeng,
-		constant.ChannelTypeDoubaoVideo,
-		constant.ChannelTypeVidu,
-		constant.ChannelTypeTaskPlugin,
-	}
 	if lo.Contains(unsupportedTestChannelTypes, channel.Type) {
 		channelTypeName := constant.GetChannelTypeName(channel.Type)
 		return testResult{
@@ -165,7 +223,13 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 	c.Request.Header.Set("Content-Type", "application/json")
 	c.Set("channel", channel.Type)
 	c.Set("base_url", channel.GetBaseURL())
-	group, _ := model.GetUserGroup(testUserID, false)
+	group := ""
+	if options.Probe != nil && options.Probe.Group != "" {
+		group = options.Probe.Group
+		common.SetContextKey(c, constant.ContextKeyUsingGroup, group)
+	} else {
+		group, _ = model.GetUserGroup(testUserID, false)
+	}
 	c.Set("group", group)
 
 	newAPIError := middleware.SetupContextForSelectedChannel(c, channel, testModel)
@@ -431,6 +495,22 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 		}
 	}
 
+	if options.Probe != nil {
+		jsonData, err = prepareProbeRequest(info, jsonData, options.Probe.MaxOutputTokens)
+		if err != nil {
+			return testResult{
+				context:     c,
+				localErr:    err,
+				newAPIError: types.NewError(err, types.ErrorCodeChannelParamOverrideInvalid, types.ErrOptionWithSkipRetry()),
+			}
+		}
+		// Billing expressions such as param("max_tokens") must see the body
+		// actually sent, not the larger ordinary test request.
+		if info.BillingRequestInput != nil {
+			info.BillingRequestInput.Body = bytes.Clone(jsonData)
+		}
+	}
+
 	requestBody := bytes.NewBuffer(jsonData)
 	c.Request.Body = io.NopCloser(bytes.NewBuffer(jsonData))
 	resp, err := adaptor.DoRequest(c, info, requestBody)
@@ -457,11 +537,17 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 				err,
 			))
 			return testResult{
-				context:     c,
-				localErr:    err,
-				newAPIError: types.NewOpenAIError(err, types.ErrorCodeBadResponse, http.StatusInternalServerError),
+				context:            c,
+				localErr:           err,
+				newAPIError:        types.NewOpenAIError(err, types.ErrorCodeBadResponse, http.StatusInternalServerError),
+				upstreamStatusCode: httpResp.StatusCode,
 			}
 		}
+	}
+	var probeCapture *probeStreamCapture
+	if options.Probe != nil && httpResp != nil && httpResp.Body != nil {
+		probeCapture = &probeStreamCapture{body: httpResp.Body, limit: 256 << 10}
+		httpResp.Body = probeCapture
 	}
 	usageA, respErr := adaptor.DoResponse(c, httpResp, info)
 	if respErr != nil {
@@ -469,6 +555,27 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 			context:     c,
 			localErr:    respErr,
 			newAPIError: respErr,
+		}
+	}
+	if options.Probe != nil {
+		if err := c.Request.Context().Err(); err != nil {
+			return testResult{context: c, localErr: err}
+		}
+		if probeCapture == nil || !info.HasSendResponse() {
+			err := errors.New("probe stream ended before the first response payload")
+			return testResult{
+				context:     c,
+				localErr:    err,
+				newAPIError: types.NewError(err, types.ErrorCodeBadResponseBody),
+			}
+		}
+		if usageA == nil {
+			err := errors.New("probe stream did not report usage")
+			return testResult{
+				context:     c,
+				localErr:    err,
+				newAPIError: types.NewError(err, types.ErrorCodeBadResponseBody),
+			}
 		}
 	}
 	usage, usageErr := coerceTestUsage(usageA, isStream, info.GetEstimatePromptTokens())
@@ -480,7 +587,11 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 		}
 	}
 	result := w.Result()
-	respBody, err := readTestResponseBody(result.Body, isStream)
+	readLimit := int64(0)
+	if options.Probe != nil {
+		readLimit = 256 << 10
+	}
+	respBody, err := readTestResponseBody(result.Body, isStream, readLimit)
 	if err != nil {
 		return testResult{
 			context:     c,
@@ -495,21 +606,41 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 			newAPIError: types.NewOpenAIError(bodyErr, types.ErrorCodeBadResponseBody, http.StatusInternalServerError),
 		}
 	}
+	if options.Probe != nil && !probeStreamHasActualUsage(probeCapture.Body()) {
+		err := errors.New("probe stream did not include upstream usage")
+		return testResult{
+			context:     c,
+			localErr:    err,
+			newAPIError: types.NewError(err, types.ErrorCodeBadResponseBody),
+		}
+	}
 	info.SetEstimatePromptTokens(usage.PromptTokens)
+	var firstByteAt time.Time
+	if options.Probe != nil {
+		firstByteAt = info.FirstResponseTime
+	}
+	firstByteMs := int64(0)
+	if !firstByteAt.IsZero() {
+		firstByteMs = firstByteAt.Sub(info.StartTime).Milliseconds()
+	}
 
-	quota, tieredResult := settleTestQuota(info, priceData, usage)
+	quota, tieredResult := settleTestQuota(c, info, priceData, usage)
 	tok := time.Now()
 	milliseconds := tok.Sub(tik).Milliseconds()
 	consumedTime := float64(milliseconds) / 1000.0
 	other := buildTestLogOther(c, info, priceData, usage, tieredResult)
+	logLabel := "模型测试"
+	if options.Probe != nil && options.Probe.LogLabel != "" {
+		logLabel = options.Probe.LogLabel
+	}
 	model.RecordConsumeLog(c, testUserID, model.RecordConsumeLogParams{
 		ChannelId:        channel.Id,
 		PromptTokens:     usage.PromptTokens,
 		CompletionTokens: usage.CompletionTokens,
 		ModelName:        info.OriginModelName,
-		TokenName:        "模型测试",
+		TokenName:        logLabel,
 		Quota:            quota,
-		Content:          "模型测试",
+		Content:          logLabel,
 		UseTimeSeconds:   int(consumedTime),
 		IsStream:         info.IsStream,
 		Group:            info.UsingGroup,
@@ -517,9 +648,13 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 	})
 	common.SysLog(fmt.Sprintf("testing channel #%d, response: \n%s", channel.Id, string(respBody)))
 	return testResult{
-		context:     c,
-		localErr:    nil,
-		newAPIError: nil,
+		context:            c,
+		localErr:           nil,
+		newAPIError:        nil,
+		firstByteAt:        firstByteAt,
+		firstByteMs:        firstByteMs,
+		hasFirstByte:       !firstByteAt.IsZero(),
+		upstreamStatusCode: http.StatusOK,
 	}
 }
 
@@ -536,7 +671,7 @@ func attachTestBillingRequestInput(info *relaycommon.RelayInfo, request dto.Requ
 	return nil
 }
 
-func settleTestQuota(info *relaycommon.RelayInfo, priceData hosttypes.PriceData, usage *dto.Usage) (int, *billingexpr.TieredResult) {
+func settleTestQuota(c *gin.Context, info *relaycommon.RelayInfo, priceData hosttypes.PriceData, usage *dto.Usage) (int, *billingexpr.TieredResult) {
 	if usage != nil && info != nil && info.TieredBillingSnapshot != nil {
 		isClaudeUsageSemantic := usage.UsageSemantic == "anthropic" || info.GetFinalRequestRelayFormat() == types.RelayFormatClaude
 		usedVars := billingexpr.UsedVars(info.TieredBillingSnapshot.ExprString)
@@ -545,18 +680,10 @@ func settleTestQuota(info *relaycommon.RelayInfo, priceData hosttypes.PriceData,
 		}
 	}
 
-	quota := 0
-	if !priceData.UsePrice {
-		completionQuota := common.QuotaRound(float64(usage.CompletionTokens) * priceData.CompletionRatio)
-		quota = common.QuotaRound(float64(usage.PromptTokens) + float64(completionQuota))
-		quota = common.QuotaRound(float64(quota) * priceData.ModelRatio)
-		if priceData.ModelRatio != 0 && quota <= 0 {
-			quota = 1
-		}
-		return quota, nil
+	if info != nil {
+		info.PriceData = priceData
 	}
-
-	return common.QuotaFromFloat(priceData.ModelPrice * common.QuotaPerUnit), nil
+	return service.CalculateTextQuota(c, info, usage), nil
 }
 
 func buildTestLogOther(c *gin.Context, info *relaycommon.RelayInfo, priceData hosttypes.PriceData, usage *dto.Usage, tieredResult *billingexpr.TieredResult) *model.LogOther {
@@ -595,13 +722,48 @@ func coerceTestUsage(usageAny any, isStream bool, estimatePromptTokens int) (*dt
 	}
 }
 
-func readTestResponseBody(body io.ReadCloser, isStream bool) ([]byte, error) {
+func readTestResponseBody(body io.ReadCloser, isStream bool, limit int64) ([]byte, error) {
 	defer func() { _ = body.Close() }()
-	const maxStreamLogBytes = 8 << 10
 	if isStream {
-		return io.ReadAll(io.LimitReader(body, maxStreamLogBytes))
+		if limit <= 0 {
+			limit = 8 << 10
+		}
+		return io.ReadAll(io.LimitReader(body, limit))
 	}
 	return io.ReadAll(body)
+}
+
+// probeStreamHasActualUsage checks the SSE body for an upstream-reported usage
+// object. It deliberately does not trust a locally estimated usage fallback:
+// a probe without real usage must fail rather than record a fake zero cost.
+func probeStreamHasActualUsage(body []byte) bool {
+	for line := range bytes.SplitSeq(body, []byte{'\n'}) {
+		line = bytes.TrimSpace(line)
+		if !bytes.HasPrefix(line, []byte("data:")) {
+			continue
+		}
+		payload := bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:")))
+		if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) {
+			continue
+		}
+		if probePayloadHasUsage(payload) {
+			return true
+		}
+	}
+	return false
+}
+
+func probePayloadHasUsage(payload []byte) bool {
+	for _, path := range []string{
+		"usage.prompt_tokens", "usage.completion_tokens", "usage.total_tokens",
+		"usage.input_tokens", "usage.output_tokens",
+		"response.usage.input_tokens", "response.usage.output_tokens", "response.usage.total_tokens",
+	} {
+		if gjson.GetBytes(payload, path).Int() > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func detectErrorFromTestResponseBody(respBody []byte) error {
@@ -840,6 +1002,59 @@ func buildTestRequest(model string, endpointType string, channel *model.Channel,
 	}
 
 	return testRequest
+}
+
+// prepareProbeRequest builds the final upstream body from a canonical minimal
+// shape instead of patching a converted body. This guarantees that a parameter
+// override cannot retain a large input, tools, extra candidates, conversation
+// history, or an unbounded token field. Only canonical OpenAI chat and
+// Responses payloads are accepted; native Claude/Gemini or other provider
+// protocols are rejected rather than receiving a guessed limit.
+func prepareProbeRequest(info *relaycommon.RelayInfo, _ []byte, maxOutputTokens int) ([]byte, error) {
+	if maxOutputTokens < 1 {
+		return nil, fmt.Errorf("probe output token limit must be positive")
+	}
+	upstreamModel := info.UpstreamModelName
+	if !adaptiveProbeModelIsText(upstreamModel) {
+		return nil, fmt.Errorf("mapped probe model %q is not a text model", upstreamModel)
+	}
+	if info.ChannelMeta != nil && !adaptiveProbeChannelTypeSupported(info.ChannelType) {
+		return nil, fmt.Errorf("channel type %d does not support bounded streaming probes", info.ChannelType)
+	}
+	fixedMessage := []any{map[string]any{"role": "user", "content": "hi"}}
+
+	var body map[string]any
+	switch info.GetFinalRequestRelayFormat() {
+	case types.RelayFormatOpenAIResponses:
+		body = map[string]any{
+			"model":             upstreamModel,
+			"input":             fixedMessage,
+			"stream":            true,
+			"store":             false,
+			"max_output_tokens": maxOutputTokens,
+		}
+	case types.RelayFormatOpenAI:
+		body = map[string]any{
+			"model":          upstreamModel,
+			"messages":       fixedMessage,
+			"stream":         true,
+			"stream_options": map[string]any{"include_usage": true},
+			"n":              1,
+		}
+		if dto.IsOpenAIReasoningOModel(upstreamModel) {
+			body["max_completion_tokens"] = maxOutputTokens
+		} else {
+			body["max_tokens"] = maxOutputTokens
+		}
+	default:
+		return nil, fmt.Errorf("probe protocol %q is not supported", info.GetFinalRequestRelayFormat())
+	}
+
+	encoded, err := common.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to prepare probe request: %w", err)
+	}
+	return encoded, nil
 }
 
 func TestChannel(c *gin.Context) {

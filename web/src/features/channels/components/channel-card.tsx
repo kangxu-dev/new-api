@@ -21,19 +21,13 @@ import { memo } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { GroupBadge } from '@/components/group-badge'
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
 
 import { CHANNEL_STATUS } from '../constants'
 import { isTagAggregateRow, parseGroupsList } from '../lib'
-import { formatScoreMultiplier } from '../lib/adaptive-score'
 import type { Channel } from '../types'
 import { ChannelRowActionsLayoutContext } from './channel-row-actions-context'
+import { ChannelScoreBadge } from './channel-score-badge'
 import { useChannels } from './channels-provider'
 
 const SENSITIVE_MASK = '••••'
@@ -54,7 +48,13 @@ function ChannelCardComponent({
   isSelected: boolean
 }) {
   const { t } = useTranslation()
-  const { sensitiveVisible, channelScores, adaptiveScoreEnabled } = useChannels()
+  const {
+    sensitiveVisible,
+    channelScores,
+    adaptiveScoreEnabled,
+    adaptiveScoreProbeEnabled,
+    adaptiveScoreMinSamples,
+  } = useChannels()
   const isTagRow = isTagAggregateRow(row.original)
   const cells = row.getAllCells()
 
@@ -185,63 +185,11 @@ function ChannelCardComponent({
           {!isTagRow && adaptiveScoreEnabled ? (
             <div className='flex shrink-0 items-center gap-1.5'>
               <span className={labelClass}>{t('Adaptive score')}</span>
-              {scoreSummary?.scored ? (
-                <TooltipProvider>
-                  <Tooltip>
-                    <TooltipTrigger
-                      render={
-                        <span className='cursor-help tabular-nums text-sm'>
-                          {formatScoreMultiplier(scoreSummary.multiplier)}
-                        </span>
-                      }
-                    />
-                    <TooltipContent>
-                      <div className='space-y-1'>
-                        <p className='font-medium'>{t('Adaptive score')}</p>
-                        {scoreSummary.entries.map((entry) => (
-                          <p key={`${entry.group}/${entry.model}`}>
-                            {`${entry.group} · ${entry.model}: `}
-                            {entry.scored
-                              ? t(
-                                  '{{multiplier}} · {{latency}}ms · {{samples}} samples · {{errors}} errors',
-                                  {
-                                    multiplier: formatScoreMultiplier(
-                                      entry.multiplier
-                                    ),
-                                    latency: Math.round(entry.avgFirstByteMs),
-                                    samples: entry.requests,
-                                    errors: entry.serverErrors,
-                                  }
-                                )
-                              : t(
-                                  'Below the sample threshold; keeps its configured weight'
-                                )}
-                          </p>
-                        ))}
-                      </div>
-                    </TooltipContent>
-                  </Tooltip>
-                </TooltipProvider>
-              ) : (
-                <TooltipProvider>
-                  <Tooltip>
-                    <TooltipTrigger
-                      render={
-                        <span className='text-muted-foreground cursor-help text-sm'>
-                          -
-                        </span>
-                      }
-                    />
-                    <TooltipContent>
-                      <p>
-                        {t(
-                          'No channel here reached the sample threshold in the scoring window, so the score is not affecting routing.'
-                        )}
-                      </p>
-                    </TooltipContent>
-                  </Tooltip>
-                </TooltipProvider>
-              )}
+              <ChannelScoreBadge
+                summary={scoreSummary}
+                probeEnabled={adaptiveScoreProbeEnabled}
+                minSamples={scoreSummary?.minSamples || adaptiveScoreMinSamples}
+              />
             </div>
           ) : null}
         </div>

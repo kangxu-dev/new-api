@@ -26,6 +26,7 @@ import React, {
   useMemo,
 } from 'react'
 
+import { getAdaptiveChannelScores } from '../api'
 import { useChannelUpstreamUpdates } from '../hooks/use-channel-upstream-updates'
 import { channelsQueryKeys } from '../lib'
 import {
@@ -33,7 +34,6 @@ import {
   type ChannelScoreSummary,
 } from '../lib/adaptive-score'
 import type { Channel } from '../types'
-import { getAdaptiveChannelScores } from '../api'
 
 // ============================================================================
 // Types
@@ -74,6 +74,8 @@ type ChannelsContextType = {
   /** Adaptive-routing score per channel, empty until the query resolves. */
   channelScores: Map<number, ChannelScoreSummary>
   adaptiveScoreEnabled: boolean
+  adaptiveScoreProbeEnabled: boolean
+  adaptiveScoreMinSamples: number
 }
 
 // ============================================================================
@@ -143,6 +145,8 @@ export function ChannelsProvider({ children }: { children: React.ReactNode }) {
       upstream,
       channelScores,
       adaptiveScoreEnabled: scoresQuery.data?.enabled ?? false,
+      adaptiveScoreProbeEnabled: scoresQuery.data?.probe_enabled ?? false,
+      adaptiveScoreMinSamples: scoresQuery.data?.min_samples ?? 0,
     }),
     [
       open,
@@ -155,6 +159,8 @@ export function ChannelsProvider({ children }: { children: React.ReactNode }) {
       upstream,
       channelScores,
       scoresQuery.data?.enabled,
+      scoresQuery.data?.probe_enabled,
+      scoresQuery.data?.min_samples,
     ]
   )
 

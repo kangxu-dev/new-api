@@ -30,9 +30,11 @@ import {
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
+
 import { SettingsCard } from '../components/settings-card'
 import { SettingsSwitchField } from '../components/settings-form-layout'
 import { safeNumberFieldProps } from '../utils/numeric-field'
+import { ProbeScheduleFields } from './probe-schedule-fields'
 import type { RoutingPolicyFormValues } from './routing-form'
 
 export function RetrySection() {
@@ -45,6 +47,10 @@ export function RetrySection() {
   const latencyMode = useWatch({
     control: form.control,
     name: 'adaptive_channel_routing_setting.latency_mode',
+  })
+  const probeEnabled = useWatch({
+    control: form.control,
+    name: 'adaptive_channel_routing_setting.probe_enabled',
   })
   const sameChannelRetries = useWatch({
     control: form.control,
@@ -333,7 +339,7 @@ export function RetrySection() {
                 onCheckedChange={field.onChange}
                 label={t('Use adaptive scores for same-priority channels')}
                 description={t(
-                  'Disabled by default. Channels with fewer than the minimum samples keep their configured weight.'
+                  'Disabled by default. Channels below the minimum samples use their probe baseline when one is available.'
                 )}
               />
             )}
@@ -374,10 +380,129 @@ export function RetrySection() {
                         {...safeNumberFieldProps(field)}
                       />
                     </FormControl>
+                    <FormDescription>
+                      {t(
+                        'Also the number of probe samples a baseline needs before routing uses it.'
+                      )}
+                    </FormDescription>
                     <FormMessage />
                   </FormItem>
                 )}
               />
+            </div>
+          ) : null}
+          {adaptiveEnabled ? (
+            <div className='space-y-4 rounded-lg border p-4'>
+              <FormField
+                control={form.control}
+                name='adaptive_channel_routing_setting.probe_enabled'
+                render={({ field }) => (
+                  <SettingsSwitchField
+                    controlId='adaptive_channel_routing_setting.probe_enabled'
+                    checked={field.value}
+                    onCheckedChange={field.onChange}
+                    label={t('Probe under-sampled channels')}
+                    description={t(
+                      'Sends a small real request to channels that explicitly list the probe model. This consumes upstream usage; measured business samples always take precedence over the baseline.'
+                    )}
+                  />
+                )}
+              />
+              {probeEnabled ? (
+                <>
+                  <FormField
+                    control={form.control}
+                    name='adaptive_channel_routing_setting.probe_model'
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>{t('Probe model')}</FormLabel>
+                        <FormControl>
+                          <Input
+                            {...field}
+                            placeholder={t('e.g. gpt-4o-mini')}
+                          />
+                        </FormControl>
+                        <FormDescription>
+                          {t(
+                            'An exact model name the channel must list. It is used only to compare channels, never as a substitute for another business model.'
+                          )}
+                        </FormDescription>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+                  <div className='grid gap-4 sm:grid-cols-3'>
+                    <FormField
+                      control={form.control}
+                      name='adaptive_channel_routing_setting.probe_interval_seconds'
+                      render={({ field }) => (
+                        <FormItem>
+                          <FormLabel>{t('Probe interval (seconds)')}</FormLabel>
+                          <FormControl>
+                            <Input
+                              type='number'
+                              min={30}
+                              max={3600}
+                              step={1}
+                              {...safeNumberFieldProps(field)}
+                            />
+                          </FormControl>
+                          <FormMessage />
+                        </FormItem>
+                      )}
+                    />
+                    <FormField
+                      control={form.control}
+                      name='adaptive_channel_routing_setting.probe_max_requests'
+                      render={({ field }) => (
+                        <FormItem>
+                          <FormLabel>{t('Probe requests per round')}</FormLabel>
+                          <FormControl>
+                            <Input
+                              type='number'
+                              min={1}
+                              max={100}
+                              step={1}
+                              {...safeNumberFieldProps(field)}
+                            />
+                          </FormControl>
+                          <FormMessage />
+                        </FormItem>
+                      )}
+                    />
+                    <FormField
+                      control={form.control}
+                      name='adaptive_channel_routing_setting.probe_max_output_tokens'
+                      render={({ field }) => (
+                        <FormItem>
+                          <FormLabel>{t('Probe output token limit')}</FormLabel>
+                          <FormControl>
+                            <Input
+                              type='number'
+                              min={1}
+                              max={1024}
+                              step={1}
+                              {...safeNumberFieldProps(field)}
+                            />
+                          </FormControl>
+                          <FormMessage />
+                        </FormItem>
+                      )}
+                    />
+                  </div>
+                  <ProbeScheduleFields />
+                  <p className='text-muted-foreground text-sm'>
+                    {t(
+                      'The output limit is applied after model conversion and parameter overrides. A 30-second per-request timeout and no automatic retries keep probe cost bounded.'
+                    )}
+                  </p>
+                  <p className='text-muted-foreground text-sm'>
+                    {t(
+                      'Probe sampling supports OpenAI-compatible streaming chat and Responses channels. Native Claude, Gemini, and unverified providers are skipped. Every probe uses a fixed one-line text input with tools disabled.'
+                    )}
+                  </p>
+                </>
+              ) : null}
             </div>
           ) : null}
           {adaptiveEnabled ? (

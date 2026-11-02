@@ -65,9 +65,14 @@ func TestAdaptiveChannelScoringLeavesUnderSampledAndDisabledChannelsNeutral(t *t
 func setAdaptiveChannelRoutingSetting(t *testing.T, setting operation_setting.AdaptiveChannelRoutingSetting) {
 	t.Helper()
 	values := map[string]string{
-		"enabled":        strconv.FormatBool(setting.Enabled),
-		"window_minutes": strconv.Itoa(setting.WindowMinutes),
-		"min_samples":    strconv.Itoa(setting.MinSamples),
+		"enabled":                 strconv.FormatBool(setting.Enabled),
+		"window_minutes":          strconv.Itoa(setting.WindowMinutes),
+		"min_samples":             strconv.Itoa(setting.MinSamples),
+		"probe_enabled":           strconv.FormatBool(setting.ProbeEnabled),
+		"probe_model":             setting.ProbeModel,
+		"probe_interval_seconds":  strconv.Itoa(setting.ProbeIntervalSeconds),
+		"probe_max_requests":      strconv.Itoa(setting.ProbeMaxRequests),
+		"probe_max_output_tokens": strconv.Itoa(setting.ProbeMaxOutputTokens),
 	}
 	if setting.LatencyMode != "" {
 		values["latency_mode"] = setting.LatencyMode
@@ -103,6 +108,10 @@ func resetAdaptiveWindows(t *testing.T) {
 	adaptiveChannelWindows.windows = make(map[adaptiveChannelKey]*adaptiveChannelWindow)
 	adaptiveChannelWindows.lastPruneAt = 0
 	adaptiveChannelWindows.Unlock()
+	adaptiveChannelProbeWindows.Lock()
+	adaptiveChannelProbeWindows.windows = make(map[adaptiveChannelProbeKey]*adaptiveChannelWindow)
+	adaptiveChannelProbeWindows.lastPruneAt = 0
+	adaptiveChannelProbeWindows.Unlock()
 }
 
 func TestAdaptiveRatioModePrefersTheFasterChannel(t *testing.T) {
@@ -253,4 +262,245 @@ func TestSnapshotAdaptiveChannelScoresMarksUnscoredChannels(t *testing.T) {
 	assert.False(t, byID[2].Scored, "a channel below the sample threshold carries no multiplier")
 	assert.Zero(t, byID[2].Multiplier)
 	assert.EqualValues(t, 2, byID[2].Requests, "its raw counts are still reported")
+}
+
+func TestAdaptiveChannelProbeBaselineCoversModelsWithoutBusinessSamples(t *testing.T) {
+	previous := operation_setting.GetAdaptiveChannelRoutingSetting()
+	t.Cleanup(func() { setAdaptiveChannelRoutingSetting(t, previous) })
+	resetAdaptiveWindows(t)
+
+	for _, mode := range []string{operation_setting.AdaptiveLatencyModeAbsolute, operation_setting.AdaptiveLatencyModeRatio} {
+		t.Run(mode, func(t *testing.T) {
+			setAdaptiveChannelRoutingSetting(t, operation_setting.AdaptiveChannelRoutingSetting{
+				Enabled: true, WindowMinutes: 30, MinSamples: 3,
+				ProbeEnabled: true, ProbeModel: "probe-model",
+				ProbeIntervalSeconds: 60, ProbeMaxRequests: 6, ProbeMaxOutputTokens: 16,
+				LatencyMode: mode, LatencyExponent: 2,
+				MultiplierMin: 0.5, MultiplierMax: 1.5,
+			})
+			resetAdaptiveWindows(t)
+			recordAdaptiveProbeLatency(t, "probe-model", 1, 3, 2000)
+			recordAdaptiveProbeLatency(t, "probe-model", 2, 3, 1000)
+
+			multipliers := AdaptiveChannelWeightMultipliers("codex", "business-never-seen")
+			require.Len(t, multipliers, 2, "a probe baseline applies even when the business model has no window")
+			assert.Greater(t, multipliers[2], multipliers[1])
+
+			baselines := SnapshotAdaptiveChannelProbeScores()
+			require.Len(t, baselines, 2)
+			byID := make(map[int]AdaptiveChannelProbeSnapshot, 2)
+			for _, baseline := range baselines {
+				byID[baseline.ChannelID] = baseline
+				assert.Equal(t, "probe-model", baseline.ProbeModel)
+				assert.Equal(t, adaptiveChannelScoreSourceProbe, baseline.Source)
+			}
+			assert.InDelta(t, multipliers[1], byID[1].Multiplier, 0.0001, "the snapshot reports the selector's baseline")
+			assert.InDelta(t, multipliers[2], byID[2].Multiplier, 0.0001)
+			assert.InDelta(t, 1000, byID[2].AvgFirstByteMs, 0.001)
+			assert.Empty(t, SnapshotAdaptiveChannelScores(), "probe observations are not business groups")
+		})
+	}
+}
+
+func TestAdaptiveChannelLiveSamplesOverrideProbeBaseline(t *testing.T) {
+	previous := operation_setting.GetAdaptiveChannelRoutingSetting()
+	t.Cleanup(func() { setAdaptiveChannelRoutingSetting(t, previous) })
+	resetAdaptiveWindows(t)
+	setAdaptiveChannelRoutingSetting(t, operation_setting.AdaptiveChannelRoutingSetting{
+		Enabled: true, WindowMinutes: 30, MinSamples: 3,
+		ProbeEnabled: true, ProbeModel: "probe-model",
+		ProbeIntervalSeconds: 60, ProbeMaxRequests: 6, ProbeMaxOutputTokens: 16,
+		LatencyMode: operation_setting.AdaptiveLatencyModeRatio, LatencyExponent: 2,
+		MultiplierMin: 0.5, MultiplierMax: 1.5,
+	})
+
+	recordAdaptiveProbeLatency(t, "probe-model", 1, 3, 2000)
+	recordAdaptiveProbeLatency(t, "probe-model", 2, 3, 1000)
+	recordAdaptiveLatency(t, "codex", "business", 1, 3, 500)
+
+	multipliers := AdaptiveChannelWeightMultipliers("codex", "business")
+	require.Len(t, multipliers, 2)
+	reports := SnapshotAdaptiveChannelScores(map[string]map[string][]int{"codex": {"business": {1, 2}}})
+	require.Len(t, reports, 1)
+	byID := make(map[int]AdaptiveChannelScoreSnapshot, 2)
+	for _, channel := range reports[0].Channels {
+		byID[channel.ChannelID] = channel
+	}
+	assert.Equal(t, adaptiveChannelScoreSourceLive, byID[1].EffectiveSource, "measured business samples win")
+	assert.Equal(t, adaptiveChannelScoreSourceProbe, byID[2].EffectiveSource, "an under-sampled channel falls back to the baseline")
+	assert.EqualValues(t, 0, byID[2].Requests, "business counters stay business counters")
+	assert.Equal(t, "probe-model", byID[2].ProbeModel)
+	assert.InDelta(t, multipliers[1], byID[1].Multiplier, 0.0001)
+	assert.InDelta(t, multipliers[2], byID[2].Multiplier, 0.0001)
+}
+
+func TestAdaptiveChannelProbeBaselineTracksModelToggleAndExpiry(t *testing.T) {
+	previous := operation_setting.GetAdaptiveChannelRoutingSetting()
+	t.Cleanup(func() { setAdaptiveChannelRoutingSetting(t, previous) })
+	resetAdaptiveWindows(t)
+	setAdaptiveChannelRoutingSetting(t, operation_setting.AdaptiveChannelRoutingSetting{
+		Enabled: true, WindowMinutes: 30, MinSamples: 2,
+		ProbeEnabled: true, ProbeModel: "probe-a",
+		ProbeIntervalSeconds: 60, ProbeMaxRequests: 6, ProbeMaxOutputTokens: 16,
+		LatencyMode: operation_setting.AdaptiveLatencyModeAbsolute,
+	})
+
+	recordAdaptiveProbeLatency(t, "probe-a", 1, 2, 1000)
+	recordAdaptiveProbeLatency(t, "probe-b", 1, 2, 500)
+	require.Len(t, AdaptiveChannelWeightMultipliers("codex", "business"), 1)
+	require.Len(t, SnapshotAdaptiveChannelProbeScores(), 1)
+	assert.Equal(t, "probe-a", SnapshotAdaptiveChannelProbeScores()[0].ProbeModel)
+
+	setAdaptiveChannelRoutingSetting(t, operation_setting.AdaptiveChannelRoutingSetting{
+		Enabled: true, WindowMinutes: 30, MinSamples: 2,
+		ProbeEnabled: true, ProbeModel: "probe-b",
+		ProbeIntervalSeconds: 60, ProbeMaxRequests: 6, ProbeMaxOutputTokens: 16,
+		LatencyMode: operation_setting.AdaptiveLatencyModeAbsolute,
+	})
+	baselines := SnapshotAdaptiveChannelProbeScores()
+	require.Len(t, baselines, 1)
+	assert.Equal(t, "probe-b", baselines[0].ProbeModel, "changing the probe model discards the old baseline")
+
+	setAdaptiveChannelRoutingSetting(t, operation_setting.AdaptiveChannelRoutingSetting{
+		Enabled: true, WindowMinutes: 30, MinSamples: 2,
+		ProbeEnabled: false, ProbeModel: "probe-b",
+		ProbeIntervalSeconds: 60, ProbeMaxRequests: 6, ProbeMaxOutputTokens: 16,
+		LatencyMode: operation_setting.AdaptiveLatencyModeAbsolute,
+	})
+	assert.Nil(t, AdaptiveChannelWeightMultipliers("codex", "business"), "disabling probes stops using old baselines")
+	assert.Empty(t, SnapshotAdaptiveChannelProbeScores())
+
+	setAdaptiveChannelRoutingSetting(t, operation_setting.AdaptiveChannelRoutingSetting{
+		Enabled: true, WindowMinutes: 1, MinSamples: 2,
+		ProbeEnabled: true, ProbeModel: "probe-b",
+		ProbeIntervalSeconds: 60, ProbeMaxRequests: 6, ProbeMaxOutputTokens: 16,
+		LatencyMode: operation_setting.AdaptiveLatencyModeAbsolute,
+	})
+	resetAdaptiveWindows(t)
+	minute := time.Now().Unix()/60 - 2
+	adaptiveChannelProbeWindows.Lock()
+	adaptiveChannelProbeWindows.windows[adaptiveChannelProbeKey{model: "probe-b", channelID: 1}] = &adaptiveChannelWindow{
+		buckets: [adaptiveChannelBucketCount]adaptiveChannelBucket{
+			{minute: minute, requests: 2, successes: 2, firstByteTotal: 1000, firstByteSample: 2},
+		},
+		lastTouch: minute,
+	}
+	adaptiveChannelProbeWindows.Unlock()
+	assert.Zero(t, AdaptiveChannelProbeRequestCount("probe-b", 1), "an expired bucket is not a sample")
+	assert.Nil(t, AdaptiveChannelWeightMultipliers("codex", "business"))
+}
+
+func TestAdaptiveChannelProbeOutcomeIgnoresClientAndRateLimitFailures(t *testing.T) {
+	previous := operation_setting.GetAdaptiveChannelRoutingSetting()
+	t.Cleanup(func() { setAdaptiveChannelRoutingSetting(t, previous) })
+	resetAdaptiveWindows(t)
+	setAdaptiveChannelRoutingSetting(t, operation_setting.AdaptiveChannelRoutingSetting{
+		Enabled: true, WindowMinutes: 30, MinSamples: 1,
+		ProbeEnabled: true, ProbeModel: "probe-classify",
+		ProbeIntervalSeconds: 60, ProbeMaxRequests: 6, ProbeMaxOutputTokens: 16,
+		LatencyMode: operation_setting.AdaptiveLatencyModeAbsolute,
+	})
+
+	RecordAdaptiveChannelProbeOutcome("probe-classify", 1, http.StatusBadRequest, false, 0, false)
+	RecordAdaptiveChannelProbeOutcome("probe-classify", 1, http.StatusTooManyRequests, false, 0, false)
+	assert.Zero(t, AdaptiveChannelProbeRequestCount("probe-classify", 1))
+	assert.Empty(t, SnapshotAdaptiveChannelProbeScores())
+
+	RecordAdaptiveChannelProbeOutcome("probe-classify", 1, http.StatusBadGateway, false, 0, false)
+	baselines := SnapshotAdaptiveChannelProbeScores()
+	require.Len(t, baselines, 1)
+	assert.EqualValues(t, 1, baselines[0].Requests)
+	assert.EqualValues(t, 1, baselines[0].ServerErrors)
+	assert.True(t, baselines[0].Scored)
+
+	RecordAdaptiveChannelProbeOutcome("probe-classify", 2, http.StatusOK, true, 900, true)
+	baselines = SnapshotAdaptiveChannelProbeScores()
+	require.Len(t, baselines, 2)
+	byID := make(map[int]AdaptiveChannelProbeSnapshot, 2)
+	for _, baseline := range baselines {
+		byID[baseline.ChannelID] = baseline
+	}
+	assert.EqualValues(t, 1, byID[2].Requests)
+	assert.InDelta(t, 900, byID[2].AvgFirstByteMs, 0.001)
+}
+
+func TestAdaptiveChannelFullyFailingLiveChannelsDoNotBorrowProbeBaseline(t *testing.T) {
+	previous := operation_setting.GetAdaptiveChannelRoutingSetting()
+	t.Cleanup(func() { setAdaptiveChannelRoutingSetting(t, previous) })
+	resetAdaptiveWindows(t)
+	setAdaptiveChannelRoutingSetting(t, operation_setting.AdaptiveChannelRoutingSetting{
+		Enabled: true, WindowMinutes: 30, MinSamples: 2,
+		ProbeEnabled: true, ProbeModel: "probe-model",
+		ProbeIntervalSeconds: 60, ProbeMaxRequests: 6, ProbeMaxOutputTokens: 16,
+		LatencyMode: operation_setting.AdaptiveLatencyModeRatio, LatencyExponent: 2,
+		MultiplierMin: 0.5, MultiplierMax: 1.5,
+	})
+
+	recordAdaptiveProbeLatency(t, "probe-model", 1, 2, 500)
+	for range 2 {
+		RecordAdaptiveChannelOutcome("codex", "business", 1, http.StatusInternalServerError, false, 0, false)
+		RecordAdaptiveChannelOutcome("codex", "business", 2, http.StatusInternalServerError, false, 0, false)
+	}
+
+	assert.Nil(t, AdaptiveChannelWeightMultipliers("codex", "business"), "a reached but fully failing live model stays neutral")
+}
+
+func recordAdaptiveProbeLatency(t *testing.T, probeModel string, channelID int, n int, firstByteMs int64) {
+	t.Helper()
+	for range n {
+		RecordAdaptiveChannelProbeOutcome(probeModel, channelID, http.StatusOK, true, firstByteMs, true)
+	}
+}
+
+func TestAdaptiveChannelNeedsProbeBaselineTracksActiveLiveSamples(t *testing.T) {
+	previous := operation_setting.GetAdaptiveChannelRoutingSetting()
+	t.Cleanup(func() { setAdaptiveChannelRoutingSetting(t, previous) })
+	resetAdaptiveWindows(t)
+	setAdaptiveChannelRoutingSetting(t, operation_setting.AdaptiveChannelRoutingSetting{
+		Enabled: true, WindowMinutes: 30, MinSamples: 2,
+		ProbeEnabled: true, ProbeModel: "probe-model",
+		ProbeIntervalSeconds: 60, ProbeMaxRequests: 6, ProbeMaxOutputTokens: 16,
+		LatencyMode: operation_setting.AdaptiveLatencyModeAbsolute,
+	})
+
+	assert.True(t, AdaptiveChannelNeedsProbeBaseline(1), "a cold channel still needs a bootstrap baseline")
+	recordAdaptiveLatency(t, "codex", "business", 1, 1, 500)
+	assert.True(t, AdaptiveChannelNeedsProbeBaseline(1), "an active model below the threshold needs probing")
+	recordAdaptiveLatency(t, "codex", "business", 1, 1, 500)
+	assert.False(t, AdaptiveChannelNeedsProbeBaseline(1), "all active business models reached the threshold")
+	recordAdaptiveLatency(t, "codex", "second-business", 1, 1, 500)
+	assert.True(t, AdaptiveChannelNeedsProbeBaseline(1), "a newly active under-sampled model re-enables probing")
+}
+
+func TestAdaptiveChannelProbeStateRoundTripsAcrossInstances(t *testing.T) {
+	previous := operation_setting.GetAdaptiveChannelRoutingSetting()
+	t.Cleanup(func() { setAdaptiveChannelRoutingSetting(t, previous) })
+	resetAdaptiveWindows(t)
+	setAdaptiveChannelRoutingSetting(t, operation_setting.AdaptiveChannelRoutingSetting{
+		Enabled: true, WindowMinutes: 30, MinSamples: 2,
+		ProbeEnabled: true, ProbeModel: "probe-model",
+		ProbeIntervalSeconds: 60, ProbeMaxRequests: 6, ProbeMaxOutputTokens: 16,
+		LatencyMode: operation_setting.AdaptiveLatencyModeRatio, LatencyExponent: 2,
+		MultiplierMin: 0.5, MultiplierMax: 1.5,
+	})
+
+	recordAdaptiveProbeLatency(t, "probe-model", 1, 3, 2000)
+	recordAdaptiveProbeLatency(t, "probe-model", 2, 3, 1000)
+	before := SnapshotAdaptiveChannelProbeScores()
+	persisted := ExportAdaptiveChannelProbeState("probe-model")
+	require.Len(t, persisted, 2)
+
+	resetAdaptiveWindows(t)
+	assert.Empty(t, SnapshotAdaptiveChannelProbeScores())
+	assert.Nil(t, AdaptiveChannelWeightMultipliers("codex", "business"))
+
+	MergeAdaptiveChannelProbeState(persisted)
+	after := SnapshotAdaptiveChannelProbeScores()
+	require.Len(t, after, len(before))
+	for i := range before {
+		assert.Equal(t, before[i].ChannelID, after[i].ChannelID)
+		assert.Equal(t, before[i].Requests, after[i].Requests)
+		assert.InDelta(t, before[i].Multiplier, after[i].Multiplier, 0.0001)
+	}
+	require.Len(t, AdaptiveChannelWeightMultipliers("codex", "business"), 2)
 }

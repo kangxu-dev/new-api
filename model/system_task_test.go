@@ -67,6 +67,15 @@ func TestSystemTaskHistoryDatabaseMatrix(t *testing.T) {
 				{TaskID: "log-only-history", Type: SystemTaskTypeLogCleanup, Status: SystemTaskStatusSucceeded},
 			}
 			require.NoError(t, db.Create(&tasks).Error)
+			require.NoError(t, db.Model(&SystemTask{}).Where("task_id = ?", "model-latest").Update("result", `{"ok":true}`).Error)
+			require.NoError(t, db.Create(&SystemTask{
+				TaskID: "model-pending-newer", Type: SystemTaskTypeModelUpdate, Status: SystemTaskStatusPending,
+			}).Error)
+			finished, err := GetLatestFinishedSystemTask(SystemTaskTypeModelUpdate)
+			require.NoError(t, err)
+			require.NotNil(t, finished)
+			assert.Equal(t, "model-latest", finished.TaskID, "a newer pending row must not hide the latest persisted result")
+			require.NoError(t, db.Where("task_id = ?", "model-pending-newer").Delete(&SystemTask{}).Error)
 			filter := SystemTaskFilter{Scope: "history", Type: SystemTaskTypeModelUpdate, Status: SystemTaskStatusFailed}
 			page, total, err := ListSystemTasks(filter, 1, 1)
 			require.NoError(t, err)

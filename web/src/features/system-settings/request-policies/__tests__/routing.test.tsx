@@ -29,6 +29,15 @@ const options = {
   'adaptive_channel_routing_setting.enabled': 'false',
   'adaptive_channel_routing_setting.window_minutes': '30',
   'adaptive_channel_routing_setting.min_samples': '10',
+  'adaptive_channel_routing_setting.probe_enabled': 'false',
+  'adaptive_channel_routing_setting.probe_model': '',
+  'adaptive_channel_routing_setting.probe_interval_seconds': '60',
+  'adaptive_channel_routing_setting.probe_max_requests': '6',
+  'adaptive_channel_routing_setting.probe_max_output_tokens': '16',
+  'adaptive_channel_routing_setting.probe_schedule_enabled': 'false',
+  'adaptive_channel_routing_setting.probe_schedule_days': '[1,2,3,4,5,6,7]',
+  'adaptive_channel_routing_setting.probe_schedule_start': '09:00',
+  'adaptive_channel_routing_setting.probe_schedule_end': '23:00',
   'channel_affinity_setting.enabled': 'true',
   'channel_affinity_setting.session_mode': '',
   'channel_affinity_setting.switch_on_success': 'false',
@@ -210,6 +219,309 @@ it('enables adaptive scoring and saves its bounded window and sample threshold',
     'adaptive_channel_routing_setting.window_minutes': '15',
     'adaptive_channel_routing_setting.min_samples': '20',
   })
+})
+it('requires a probe model before probe sampling can be saved', async () => {
+  show()
+  await userEvent.click(
+    await screen.findByRole('switch', {
+      name: 'Use adaptive scores for same-priority channels',
+    })
+  )
+  await userEvent.click(
+    screen.getByRole('switch', { name: 'Probe under-sampled channels' })
+  )
+  await userEvent.click(screen.getByRole('button', { name: 'Save Changes' }))
+  expect(api.patch).not.toHaveBeenCalled()
+  expect(
+    await screen.findByText(
+      'Probe model is required when probe sampling is enabled'
+    )
+  ).toBeVisible()
+})
+it('saves bounded probe sampling settings', async () => {
+  show()
+  await userEvent.click(
+    await screen.findByRole('switch', {
+      name: 'Use adaptive scores for same-priority channels',
+    })
+  )
+  await userEvent.click(
+    screen.getByRole('switch', { name: 'Probe under-sampled channels' })
+  )
+  fireEvent.change(screen.getByRole('textbox', { name: 'Probe model' }), {
+    target: { value: 'gpt-4o-mini' },
+  })
+  fireEvent.change(
+    screen.getByRole('spinbutton', { name: 'Probe interval (seconds)' }),
+    { target: { value: '120' } }
+  )
+  fireEvent.change(
+    screen.getByRole('spinbutton', { name: 'Probe requests per round' }),
+    { target: { value: '4' } }
+  )
+  fireEvent.change(
+    screen.getByRole('spinbutton', { name: 'Probe output token limit' }),
+    { target: { value: '24' } }
+  )
+  await userEvent.click(screen.getByRole('button', { name: 'Save Changes' }))
+  await waitFor(() => expect(api.patch).toHaveBeenCalledTimes(1))
+  const payload = vi.mocked(api.patch).mock.calls[0][1] as {
+    options: Record<string, string>
+  }
+  expect(payload.options).toMatchObject({
+    'adaptive_channel_routing_setting.probe_enabled': 'true',
+    'adaptive_channel_routing_setting.probe_model': 'gpt-4o-mini',
+    'adaptive_channel_routing_setting.probe_interval_seconds': '120',
+    'adaptive_channel_routing_setting.probe_max_requests': '4',
+    'adaptive_channel_routing_setting.probe_max_output_tokens': '24',
+  })
+})
+it('saves a weekly probe schedule and keeps only the selected days', async () => {
+  show()
+  await userEvent.click(
+    await screen.findByRole('switch', {
+      name: 'Use adaptive scores for same-priority channels',
+    })
+  )
+  await userEvent.click(
+    screen.getByRole('switch', { name: 'Probe under-sampled channels' })
+  )
+  fireEvent.change(screen.getByRole('textbox', { name: 'Probe model' }), {
+    target: { value: 'gpt-4o-mini' },
+  })
+  await userEvent.click(
+    screen.getByRole('switch', {
+      name: 'Limit probe sampling to a weekly schedule',
+    })
+  )
+  await userEvent.click(screen.getByRole('button', { name: 'Monday' }))
+  fireEvent.change(screen.getByLabelText('Start time'), {
+    target: { value: '22:00' },
+  })
+  fireEvent.change(screen.getByLabelText('End time'), {
+    target: { value: '02:00' },
+  })
+  await userEvent.click(screen.getByRole('button', { name: 'Save Changes' }))
+  await waitFor(() => expect(api.patch).toHaveBeenCalledTimes(1))
+  const payload = vi.mocked(api.patch).mock.calls[0][1] as {
+    options: Record<string, string>
+  }
+  expect(payload.options).toMatchObject({
+    'adaptive_channel_routing_setting.probe_schedule_enabled': 'true',
+    'adaptive_channel_routing_setting.probe_schedule_days': '[2,3,4,5,6,7]',
+    'adaptive_channel_routing_setting.probe_schedule_start': '22:00',
+    'adaptive_channel_routing_setting.probe_schedule_end': '02:00',
+  })
+})
+it('rejects an enabled schedule with no selected days', async () => {
+  show()
+  await userEvent.click(
+    await screen.findByRole('switch', {
+      name: 'Use adaptive scores for same-priority channels',
+    })
+  )
+  await userEvent.click(
+    screen.getByRole('switch', { name: 'Probe under-sampled channels' })
+  )
+  fireEvent.change(screen.getByRole('textbox', { name: 'Probe model' }), {
+    target: { value: 'gpt-4o-mini' },
+  })
+  await userEvent.click(
+    screen.getByRole('switch', {
+      name: 'Limit probe sampling to a weekly schedule',
+    })
+  )
+  for (const day of [
+    'Monday',
+    'Tuesday',
+    'Wednesday',
+    'Thursday',
+    'Friday',
+    'Saturday',
+    'Sunday',
+  ]) {
+    await userEvent.click(screen.getByRole('button', { name: day }))
+  }
+  await userEvent.click(screen.getByRole('button', { name: 'Save Changes' }))
+  expect(api.patch).not.toHaveBeenCalled()
+  expect(await screen.findByText('Select at least one day')).toBeVisible()
+})
+it('rejects a schedule whose start and end times are equal', async () => {
+  show()
+  await userEvent.click(
+    await screen.findByRole('switch', {
+      name: 'Use adaptive scores for same-priority channels',
+    })
+  )
+  await userEvent.click(
+    screen.getByRole('switch', { name: 'Probe under-sampled channels' })
+  )
+  fireEvent.change(screen.getByRole('textbox', { name: 'Probe model' }), {
+    target: { value: 'gpt-4o-mini' },
+  })
+  await userEvent.click(
+    screen.getByRole('switch', {
+      name: 'Limit probe sampling to a weekly schedule',
+    })
+  )
+  fireEvent.change(screen.getByLabelText('End time'), {
+    target: { value: '09:00' },
+  })
+  await userEvent.click(screen.getByRole('button', { name: 'Save Changes' }))
+  expect(api.patch).not.toHaveBeenCalled()
+  expect(
+    await screen.findByText('Start and end times must differ')
+  ).toBeVisible()
+})
+it('keeps schedule draft values when the schedule restriction is turned off', async () => {
+  show()
+  await userEvent.click(
+    await screen.findByRole('switch', {
+      name: 'Use adaptive scores for same-priority channels',
+    })
+  )
+  await userEvent.click(
+    screen.getByRole('switch', { name: 'Probe under-sampled channels' })
+  )
+  fireEvent.change(screen.getByRole('textbox', { name: 'Probe model' }), {
+    target: { value: 'gpt-4o-mini' },
+  })
+  const scheduleSwitch = screen.getByRole('switch', {
+    name: 'Limit probe sampling to a weekly schedule',
+  })
+  await userEvent.click(scheduleSwitch)
+  expect(
+    screen.getByRole('switch', {
+      name: 'Limit probe sampling to a weekly schedule',
+    })
+  ).toBeChecked()
+  await userEvent.click(screen.getByRole('button', { name: 'Monday' }))
+  fireEvent.change(screen.getByLabelText('Start time'), {
+    target: { value: '22:00' },
+  })
+  fireEvent.change(screen.getByLabelText('End time'), {
+    target: { value: '02:00' },
+  })
+  const scheduleOffSwitch = screen.getByRole('switch', {
+    name: 'Limit probe sampling to a weekly schedule',
+  })
+  await userEvent.click(scheduleOffSwitch)
+  await waitFor(() => expect(scheduleOffSwitch).not.toBeChecked())
+  await userEvent.click(screen.getByRole('button', { name: 'Save Changes' }))
+  await waitFor(() => expect(api.patch).toHaveBeenCalledTimes(1))
+  const payload = vi.mocked(api.patch).mock.calls[0][1] as {
+    options: Record<string, string>
+  }
+  expect(payload.options).toMatchObject({
+    'adaptive_channel_routing_setting.probe_schedule_days': '[2,3,4,5,6,7]',
+    'adaptive_channel_routing_setting.probe_schedule_start': '22:00',
+    'adaptive_channel_routing_setting.probe_schedule_end': '02:00',
+  })
+  expect(payload.options).not.toHaveProperty(
+    'adaptive_channel_routing_setting.probe_schedule_enabled'
+  )
+})
+it('keeps schedule values when probe sampling is turned off', async () => {
+  show()
+  await userEvent.click(
+    await screen.findByRole('switch', {
+      name: 'Use adaptive scores for same-priority channels',
+    })
+  )
+  await userEvent.click(
+    screen.getByRole('switch', { name: 'Probe under-sampled channels' })
+  )
+  fireEvent.change(screen.getByRole('textbox', { name: 'Probe model' }), {
+    target: { value: 'gpt-4o-mini' },
+  })
+  await userEvent.click(
+    screen.getByRole('switch', {
+      name: 'Limit probe sampling to a weekly schedule',
+    })
+  )
+  await userEvent.click(screen.getByRole('button', { name: 'Monday' }))
+  fireEvent.change(screen.getByLabelText('Start time'), {
+    target: { value: '22:00' },
+  })
+  fireEvent.change(screen.getByLabelText('End time'), {
+    target: { value: '02:00' },
+  })
+  await userEvent.click(
+    screen.getByRole('switch', { name: 'Probe under-sampled channels' })
+  )
+  await userEvent.click(screen.getByRole('button', { name: 'Save Changes' }))
+  await waitFor(() => expect(api.patch).toHaveBeenCalledTimes(1))
+  const payload = vi.mocked(api.patch).mock.calls[0][1] as {
+    options: Record<string, string>
+  }
+  expect(payload.options).toMatchObject({
+    'adaptive_channel_routing_setting.probe_schedule_enabled': 'true',
+    'adaptive_channel_routing_setting.probe_schedule_days': '[2,3,4,5,6,7]',
+    'adaptive_channel_routing_setting.probe_schedule_start': '22:00',
+    'adaptive_channel_routing_setting.probe_schedule_end': '02:00',
+  })
+  expect(payload.options).not.toHaveProperty(
+    'adaptive_channel_routing_setting.probe_enabled'
+  )
+})
+it('saves a disabled schedule with an empty clock draft and keeps it when re-enabled', async () => {
+  show()
+  await userEvent.click(
+    await screen.findByRole('switch', {
+      name: 'Use adaptive scores for same-priority channels',
+    })
+  )
+  await userEvent.click(
+    screen.getByRole('switch', { name: 'Probe under-sampled channels' })
+  )
+  fireEvent.change(screen.getByRole('textbox', { name: 'Probe model' }), {
+    target: { value: 'gpt-4o-mini' },
+  })
+  await userEvent.click(
+    screen.getByRole('switch', {
+      name: 'Limit probe sampling to a weekly schedule',
+    })
+  )
+  fireEvent.change(screen.getByLabelText('Start time'), {
+    target: { value: '' },
+  })
+  await userEvent.click(
+    screen.getByRole('switch', {
+      name: 'Limit probe sampling to a weekly schedule',
+    })
+  )
+  await userEvent.click(screen.getByRole('button', { name: 'Save Changes' }))
+  await waitFor(() => expect(api.patch).toHaveBeenCalledTimes(1))
+  const payload = vi.mocked(api.patch).mock.calls[0][1] as {
+    options: Record<string, string>
+  }
+  expect(payload.options).toMatchObject({
+    'adaptive_channel_routing_setting.probe_schedule_start': '',
+  })
+
+  await userEvent.click(
+    screen.getByRole('switch', {
+      name: 'Limit probe sampling to a weekly schedule',
+    })
+  )
+  expect(screen.getByLabelText('Start time')).toHaveValue('')
+})
+it('does not silently save invalid stored schedule JSON as unrestricted', async () => {
+  currentOptions['adaptive_channel_routing_setting.probe_enabled'] = 'true'
+  currentOptions['adaptive_channel_routing_setting.probe_model'] = 'gpt-4o-mini'
+  currentOptions['adaptive_channel_routing_setting.probe_schedule_enabled'] =
+    'true'
+  currentOptions['adaptive_channel_routing_setting.probe_schedule_days'] =
+    'not-json'
+  show()
+  await userEvent.click(
+    await screen.findByRole('switch', {
+      name: 'Use adaptive scores for same-priority channels',
+    })
+  )
+  await userEvent.click(screen.getByRole('button', { name: 'Save Changes' }))
+  expect(api.patch).not.toHaveBeenCalled()
+  expect(await screen.findByText('Select at least one day')).toBeVisible()
 })
 it('session rules sit between the session defaults and the retry budget', async () => {
   show()

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"unicode"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/setting"
@@ -77,6 +78,14 @@ func IsRequestPolicyOption(key string) bool {
 	return false
 }
 
+func normalizeRequestPolicyOptionValues(values map[string]string) map[string]string {
+	normalized := maps.Clone(values)
+	if value, ok := normalized["adaptive_channel_routing_setting.probe_model"]; ok {
+		normalized["adaptive_channel_routing_setting.probe_model"] = strings.TrimSpace(value)
+	}
+	return normalized
+}
+
 func CurrentRequestPolicy() *RequestPolicySnapshot {
 	if snapshot := requestPolicySnapshot.Load(); snapshot != nil {
 		return snapshot
@@ -115,7 +124,11 @@ func BuildRequestPolicy(options map[string]string) (*RequestPolicySnapshot, erro
 		if field, ok := strings.CutPrefix(key, "adaptive_channel_routing_setting."); ok {
 			switch field {
 			case "enabled", "window_minutes", "min_samples", "latency_mode",
-				"latency_exponent", "multiplier_min", "multiplier_max":
+				"latency_exponent", "multiplier_min", "multiplier_max",
+				"probe_enabled", "probe_model", "probe_interval_seconds",
+				"probe_max_requests", "probe_max_output_tokens",
+				"probe_schedule_enabled", "probe_schedule_days",
+				"probe_schedule_start", "probe_schedule_end":
 			default:
 				return nil, fmt.Errorf("unknown adaptive channel routing option: %s", key)
 			}
@@ -151,7 +164,7 @@ func BuildRequestPolicy(options map[string]string) (*RequestPolicySnapshot, erro
 	}
 	adaptiveJSON := map[string]json.RawMessage{}
 	for key, value := range adaptiveFields {
-		if key == "latency_mode" {
+		if key == "latency_mode" || key == "probe_model" || key == "probe_schedule_start" || key == "probe_schedule_end" {
 			encoded, _ := common.Marshal(value)
 			adaptiveJSON[key] = encoded
 		} else {
@@ -188,6 +201,31 @@ func BuildRequestPolicy(options map[string]string) (*RequestPolicySnapshot, erro
 	}
 	if adaptiveSetting.MultiplierMax < adaptiveSetting.MultiplierMin {
 		return nil, fmt.Errorf("adaptive multiplier maximum must not be below the minimum")
+	}
+	adaptiveSetting.ProbeModel = strings.TrimSpace(adaptiveSetting.ProbeModel)
+	if len(adaptiveSetting.ProbeModel) > operation_setting.AdaptiveProbeModelMaxLength {
+		return nil, fmt.Errorf("adaptive probe model must not exceed %d characters", operation_setting.AdaptiveProbeModelMaxLength)
+	}
+	if strings.ContainsAny(adaptiveSetting.ProbeModel, "\r\n\t") {
+		return nil, fmt.Errorf("adaptive probe model must be a single model name")
+	}
+	if strings.ContainsFunc(adaptiveSetting.ProbeModel, unicode.IsControl) {
+		return nil, fmt.Errorf("adaptive probe model must not contain control characters")
+	}
+	if adaptiveSetting.ProbeEnabled && adaptiveSetting.ProbeModel == "" {
+		return nil, fmt.Errorf("adaptive probe model is required when probe sampling is enabled")
+	}
+	if adaptiveSetting.ProbeIntervalSeconds < operation_setting.AdaptiveProbeIntervalSecondsMin || adaptiveSetting.ProbeIntervalSeconds > operation_setting.AdaptiveProbeIntervalSecondsMax {
+		return nil, fmt.Errorf("adaptive probe interval must be between %d and %d seconds", operation_setting.AdaptiveProbeIntervalSecondsMin, operation_setting.AdaptiveProbeIntervalSecondsMax)
+	}
+	if adaptiveSetting.ProbeMaxRequests < operation_setting.AdaptiveProbeMaxRequestsMin || adaptiveSetting.ProbeMaxRequests > operation_setting.AdaptiveProbeMaxRequestsMax {
+		return nil, fmt.Errorf("adaptive probe requests per round must be between %d and %d", operation_setting.AdaptiveProbeMaxRequestsMin, operation_setting.AdaptiveProbeMaxRequestsMax)
+	}
+	if adaptiveSetting.ProbeMaxOutputTokens < operation_setting.AdaptiveProbeMaxOutputTokensMin || adaptiveSetting.ProbeMaxOutputTokens > operation_setting.AdaptiveProbeMaxOutputTokensMax {
+		return nil, fmt.Errorf("adaptive probe output tokens must be between %d and %d", operation_setting.AdaptiveProbeMaxOutputTokensMin, operation_setting.AdaptiveProbeMaxOutputTokensMax)
+	}
+	if err := adaptiveSetting.ValidateProbeSchedule(); err != nil {
+		return nil, err
 	}
 	retryFailoverJSON := map[string]json.RawMessage{}
 	for key, value := range retryFailoverFields {
@@ -316,6 +354,7 @@ func refreshRequestPolicySnapshot() error {
 func UpdateRequestPolicyOptions(values map[string]string) error {
 	requestPolicyOptionMutex.Lock()
 	defer requestPolicyOptionMutex.Unlock()
+	values = normalizeRequestPolicyOptionValues(values)
 	options := maps.Clone(CurrentRequestPolicy().Options)
 	for key, value := range values {
 		if !IsRequestPolicyOption(key) {

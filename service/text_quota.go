@@ -390,6 +390,17 @@ func usageSemanticFromUsage(relayInfo *relaycommon.RelayInfo, usage *dto.Usage) 
 	return "openai"
 }
 
+// CalculateTextQuota returns the same legacy text quota used by the normal
+// relay path, including cached-token discounts, group ratio, completion ratio,
+// and other ratios. Tiered/fixed-price snapshots remain the caller's concern.
+func CalculateTextQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, usage *dto.Usage) int {
+	if relayInfo == nil {
+		return 0
+	}
+	summary := calculateTextQuotaSummary(ctx, relayInfo, effectiveBillingUsage(usage))
+	return summary.Quota
+}
+
 func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, usage *dto.Usage, extraContent []string) {
 	originUsage := usage
 	billingUsage := effectiveBillingUsage(usage)

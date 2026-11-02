@@ -395,10 +395,10 @@ export interface AddChannelRequest {
  * One channel's current adaptive-routing input, as reported by
  * `GET /api/option/adaptive_channel_scores`.
  *
- * `scored` is the important field: false means the channel did not reach
- * `min_samples` inside the window, so it carries no multiplier and keeps its
- * configured weight. That is otherwise indistinguishable from a score that is
- * running but finds the channels equally good.
+ * `scored` is true when the channel carries a multiplier. For a business model
+ * with enough samples that multiplier is measured (`source: live`); below the
+ * threshold the selector may use the channel's probe baseline
+ * (`source: probe`) instead.
  */
 export interface AdaptiveChannelScore {
   channel_id: number
@@ -409,6 +409,31 @@ export interface AdaptiveChannelScore {
   avg_first_byte_ms: number
   scored: boolean
   multiplier: number
+  /**
+   * Which input produced the effective multiplier. The counters above always
+   * describe live business traffic, even when the multiplier is a baseline.
+   */
+  effective_source: '' | 'live' | 'probe'
+  /** Set when effective_source is probe. */
+  probe_model?: string
+}
+
+/**
+ * A channel baseline built from the configured probe model. It is reported
+ * separately from business groups so a baseline can exist before any business
+ * request has reached the sample threshold.
+ */
+export interface AdaptiveChannelProbeBaseline {
+  channel_id: number
+  channel_name: string
+  probe_model: string
+  requests: number
+  successes: number
+  server_errors: number
+  avg_first_byte_ms: number
+  scored: boolean
+  multiplier: number
+  source: 'probe'
 }
 
 export interface AdaptiveChannelScoreGroup {
@@ -422,5 +447,8 @@ export interface AdaptiveChannelScoresResponse {
   latency_mode: string
   window_minutes: number
   min_samples: number
+  probe_enabled: boolean
+  probe_model: string
   groups: AdaptiveChannelScoreGroup[]
+  probe_baselines: AdaptiveChannelProbeBaseline[]
 }

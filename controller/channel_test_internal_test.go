@@ -266,7 +266,8 @@ func TestSettleTestQuotaUsesTieredBilling(t *testing.T) {
 		},
 	}
 
-	quota, result := settleTestQuota(info, types.PriceData{
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	quota, result := settleTestQuota(ctx, info, types.PriceData{
 		ModelRatio:      1,
 		CompletionRatio: 2,
 	}, &dto.Usage{
@@ -276,6 +277,61 @@ func TestSettleTestQuotaUsesTieredBilling(t *testing.T) {
 	require.Equal(t, 1500, quota)
 	require.NotNil(t, result)
 	require.Equal(t, "stream", result.MatchedTier)
+}
+
+func TestSettleTestQuotaDiscountsProbeCachedTokens(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	info := &relaycommon.RelayInfo{
+		ChannelMeta:     &relaycommon.ChannelMeta{},
+		OriginModelName: "gpt-6.1-sol",
+	}
+	priceData := types.PriceData{
+		ModelRatio:      1,
+		CompletionRatio: 5,
+		CacheRatio:      0.05,
+		GroupRatioInfo:  types.GroupRatioInfo{GroupRatio: 1},
+	}
+	cachedUsage := &dto.Usage{
+		PromptTokens:     22423,
+		CompletionTokens: 12,
+		PromptTokensDetails: dto.InputTokenDetails{
+			CachedTokens: 22420,
+		},
+	}
+
+	quota, result := settleTestQuota(ctx, info, priceData, cachedUsage)
+	assert.Nil(t, result)
+	assert.Equal(t, 1184, quota, "cached tokens must use CacheRatio instead of the full prompt ratio")
+	assert.Equal(t, 22423, cachedUsage.PromptTokens, "the log keeps the upstream raw prompt tokens")
+	assert.Equal(t, 12, cachedUsage.CompletionTokens, "the log keeps the upstream raw completion tokens")
+	assert.Equal(t, 22420, cachedUsage.PromptTokensDetails.CachedTokens, "the log keeps the upstream raw cached tokens")
+	assert.Less(t, quota, 22483)
+	logOther := buildTestLogOther(ctx, info, priceData, cachedUsage, nil).Snapshot()
+	assert.Equal(t, 22420, logOther["cache_tokens"], "the consume log keeps the upstream cached token count")
+	assert.Equal(t, 0.05, logOther["cache_ratio"], "the consume log records the cache ratio used for the discount")
+
+	uncachedQuota, uncachedResult := settleTestQuota(ctx, info, priceData, &dto.Usage{
+		PromptTokens: 18, CompletionTokens: 13,
+	})
+	assert.Nil(t, uncachedResult)
+	assert.Equal(t, 83, uncachedQuota, "a channel without cache hits keeps the plain text result")
+
+	grouped := priceData
+	grouped.GroupRatioInfo.GroupRatio = 2
+	groupedQuota, _ := settleTestQuota(ctx, info, grouped, &dto.Usage{
+		PromptTokens: 22423, CompletionTokens: 12,
+		PromptTokensDetails: dto.InputTokenDetails{CachedTokens: 22420},
+	})
+	assert.Equal(t, 2368, groupedQuota, "the group ratio still applies to the discounted amount")
+
+	withOtherRatio := priceData
+	withOtherRatio.AddOtherRatio("probe", 2)
+	otherQuota, _ := settleTestQuota(ctx, info, withOtherRatio, &dto.Usage{
+		PromptTokens: 22423, CompletionTokens: 12,
+		PromptTokensDetails: dto.InputTokenDetails{CachedTokens: 22420},
+	})
+	assert.Equal(t, 2368, otherQuota, "other ratios still apply to the discounted amount")
 }
 
 func TestBuildTestLogOtherInjectsTieredInfo(t *testing.T) {
