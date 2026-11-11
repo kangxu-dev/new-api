@@ -40,14 +40,20 @@ func GetAdaptiveChannelScores(c *gin.Context) {
 		}
 	}
 	common.ApiSuccess(c, gin.H{
-		"enabled":         setting.Enabled,
-		"latency_mode":    setting.LatencyMode,
-		"window_minutes":  setting.WindowMinutes,
-		"min_samples":     setting.MinSamples,
-		"probe_enabled":   setting.ProbeEnabled,
-		"probe_model":     setting.ProbeModel,
-		"groups":          groups,
-		"probe_baselines": probeBaselines,
+		"enabled":        setting.Enabled,
+		"latency_mode":   setting.LatencyMode,
+		"window_minutes": setting.WindowMinutes,
+		"min_samples":    setting.MinSamples,
+		"probe_enabled":  setting.ProbeEnabled,
+		"probe_model":    setting.ProbeModel,
+		// The probe task fills the window rather than stopping at MinSamples, so
+		// this is the most samples a baseline can hold. When it sits below
+		// min_samples the baseline can never be scored and the badge stays on
+		// "sampling" forever, which is otherwise indistinguishable from a probe
+		// that is merely still filling.
+		"probe_window_capacity": setting.ProbeWindowCapacity(),
+		"groups":                groups,
+		"probe_baselines":       probeBaselines,
 	})
 }
 

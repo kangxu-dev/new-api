@@ -152,6 +152,26 @@ func GetAdaptiveChannelRoutingSetting() AdaptiveChannelRoutingSetting {
 
 var adaptiveProbeScheduleZone = time.FixedZone("Asia/Shanghai", 8*60*60)
 
+// ProbeWindowCapacity is how many probes fit inside the scoring window at the
+// configured interval. Probing beyond it is pointless because older samples age
+// out as fast as new ones arrive.
+//
+// This is also the probe task's target. Stopping at MinSamples instead leaves
+// the baseline parked exactly on the threshold, so every time the oldest sample
+// slides out of the window the count drops below it and routing silently falls
+// back to neutral until the next round refills it. Filling the window keeps the
+// count above the threshold at all times, which is what a rolling window needs.
+func (setting AdaptiveChannelRoutingSetting) ProbeWindowCapacity() int64 {
+	if setting.ProbeIntervalSeconds <= 0 || setting.WindowMinutes <= 0 {
+		return 0
+	}
+	capacity := int64(setting.WindowMinutes) * 60 / int64(setting.ProbeIntervalSeconds)
+	if capacity < 1 {
+		return 1
+	}
+	return capacity
+}
+
 // ValidateProbeSchedule checks the weekly restriction before it is persisted or
 // used. A disabled schedule may keep an incomplete draft, but any supplied value
 // must still be well formed; an enabled schedule needs at least one day and two

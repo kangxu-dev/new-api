@@ -359,8 +359,8 @@ func adaptiveProbeChannelSupportsModel(channel *model.Channel, probeModel string
 
 // runAdaptiveChannelProbeTask performs one bounded probe round. It enumerates
 // enabled channels from the database, probes only channels that explicitly list
-// the configured probe model, prioritises the least-sampled channels, and stops
-// as soon as each channel reaches MinSamples in the scoring window.
+// the configured probe model, prioritises the least-sampled channels, and fills
+// each channel's scoring window up to ProbeWindowCapacity.
 func runAdaptiveChannelProbeTask(ctx context.Context) (adaptiveChannelProbeSummary, error) {
 	summary := adaptiveChannelProbeSummary{}
 	if ctx == nil {
@@ -410,7 +410,11 @@ func runAdaptiveChannelProbeTask(ctx context.Context) (adaptiveChannelProbeSumma
 			continue
 		}
 		samples := service.AdaptiveChannelProbeRequestCount(setting.ProbeModel, channel.Id)
-		if samples >= int64(setting.MinSamples) {
+		// Top the baseline up to what the scoring window can hold rather than
+		// stopping at MinSamples. The window rolls, so a baseline parked on the
+		// threshold drops below it every time its oldest sample ages out, and
+		// routing silently reverts to neutral until the next round refills it.
+		if samples >= setting.ProbeWindowCapacity() {
 			continue
 		}
 		key := adaptiveChannelProbeBackoffKey{model: setting.ProbeModel, channelID: channel.Id}

@@ -534,13 +534,48 @@ func TestAdaptiveChannelProbeTaskRotatesAndStopsAtThreshold(t *testing.T) {
 		assert.GreaterOrEqual(t, baseline.Requests, int64(1), "fair rotation reaches every channel")
 	}
 
+	// Probing continues past MinSamples. Stopping at the threshold parked the
+	// baseline exactly on it, so as the scoring window rolled the oldest sample
+	// slid out and routing reverted to neutral until the next round. The task
+	// now fills the window instead.
 	withLowerThreshold := setting
 	withLowerThreshold.MinSamples = 1
 	updateProbeControllerSetting(t, withLowerThreshold)
 	third, err := runAdaptiveChannelProbeTask(context.Background())
 	require.NoError(t, err)
-	assert.Zero(t, third.Tested, "channels that reached MinSamples are not probed again")
-	assert.EqualValues(t, 4, requests.Load())
+	assert.Equal(t, 2, third.Tested, "the window is not full yet, so probing continues regardless of MinSamples")
+	assert.Greater(t, requests.Load(), int64(4))
+}
+
+func TestAdaptiveChannelProbeStopsWhenTheWindowIsFull(t *testing.T) {
+	db := setupProbeControllerDB(t, "sqlite")
+	createProbeRootUser(t, db, "capacity")
+	probeModel := "probe-capacity-model"
+	ensureProbeModelRatio(t, probeModel)
+	// Two minutes at a one-minute interval holds exactly two probes per channel.
+	setting := operation_setting.AdaptiveChannelRoutingSetting{
+		Enabled: true, WindowMinutes: 2, MinSamples: 1,
+		ProbeEnabled: true, ProbeModel: probeModel,
+		ProbeIntervalSeconds: 60, ProbeMaxRequests: 1, ProbeMaxOutputTokens: 16,
+		LatencyMode:     operation_setting.AdaptiveLatencyModeAbsolute,
+		LatencyExponent: 2, MultiplierMin: 0.5, MultiplierMax: 1.5,
+	}
+	setProbeControllerSetting(t, setting)
+	require.EqualValues(t, 2, setting.ProbeWindowCapacity())
+
+	var requests atomic.Int64
+	server := probeStreamServer(t, &requests, nil, nil)
+	createProbeChannel(t, db, server.URL, "probe-capacity", probeModel, nil)
+
+	for round := 1; round <= 2; round++ {
+		summary, err := runAdaptiveChannelProbeTask(context.Background())
+		require.NoError(t, err)
+		assert.Equal(t, 1, summary.Tested, "round %d tops the baseline up", round)
+	}
+	summary, err := runAdaptiveChannelProbeTask(context.Background())
+	require.NoError(t, err)
+	assert.Zero(t, summary.Tested, "a window full of probes is not probed again")
+	assert.EqualValues(t, 2, requests.Load())
 }
 
 func TestAdaptiveChannelProbeSkipsChannelsWithEnoughLiveSamples(t *testing.T) {
@@ -576,13 +611,17 @@ func TestAdaptiveChannelProbeLoadsPersistedStateOnAnotherRunner(t *testing.T) {
 	createProbeRootUser(t, db, "persisted")
 	probeModel := "probe-persisted-model"
 	ensureProbeModelRatio(t, probeModel)
-	setProbeControllerSetting(t, operation_setting.AdaptiveChannelRoutingSetting{
-		Enabled: true, WindowMinutes: 30, MinSamples: 2,
+	// A two-minute window at a one-minute interval holds two probes, so the
+	// persisted bucket below fills it and the new runner has nothing to add.
+	setting := operation_setting.AdaptiveChannelRoutingSetting{
+		Enabled: true, WindowMinutes: 2, MinSamples: 2,
 		ProbeEnabled: true, ProbeModel: probeModel,
 		ProbeIntervalSeconds: 60, ProbeMaxRequests: 1, ProbeMaxOutputTokens: 16,
 		LatencyMode:     operation_setting.AdaptiveLatencyModeAbsolute,
 		LatencyExponent: 2, MultiplierMin: 0.5, MultiplierMax: 1.5,
-	})
+	}
+	setProbeControllerSetting(t, setting)
+	require.EqualValues(t, 2, setting.ProbeWindowCapacity())
 
 	var requests atomic.Int64
 	server := probeStreamServer(t, &requests, nil, nil)

@@ -224,6 +224,11 @@ func BuildRequestPolicy(options map[string]string) (*RequestPolicySnapshot, erro
 	if adaptiveSetting.ProbeMaxOutputTokens < operation_setting.AdaptiveProbeMaxOutputTokensMin || adaptiveSetting.ProbeMaxOutputTokens > operation_setting.AdaptiveProbeMaxOutputTokensMax {
 		return nil, fmt.Errorf("adaptive probe output tokens must be between %d and %d", operation_setting.AdaptiveProbeMaxOutputTokensMin, operation_setting.AdaptiveProbeMaxOutputTokensMax)
 	}
+	// MinSamples also gates live traffic, which has no window-capacity limit, so
+	// a threshold above what the probe can hold is legitimate for a busy
+	// deployment. The probe simply tops out at ProbeWindowCapacity; the scores
+	// endpoint reports that capacity so the shortfall is diagnosable rather
+	// than a silent "sampling" that never finishes.
 	if err := adaptiveSetting.ValidateProbeSchedule(); err != nil {
 		return nil, err
 	}

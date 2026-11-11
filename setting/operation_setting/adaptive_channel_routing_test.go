@@ -110,3 +110,28 @@ func TestAdaptiveChannelRoutingSettingClonesScheduleDays(t *testing.T) {
 	first.ProbeScheduleDays[0] = 7
 	assert.Equal(t, []int{1, 2}, GetAdaptiveChannelRoutingSetting().ProbeScheduleDays)
 }
+
+func TestProbeWindowCapacity(t *testing.T) {
+	for _, test := range []struct {
+		window, interval int
+		want             int64
+	}{
+		{window: 60, interval: 300, want: 12},
+		{window: 30, interval: 300, want: 6},
+		{window: 30, interval: 60, want: 30},
+		{window: 60, interval: 30, want: 120},
+		// An interval longer than the window still yields one slot, so a
+		// baseline can exist at all instead of dividing by zero or skipping.
+		{window: 1, interval: 3600, want: 1},
+	} {
+		setting := AdaptiveChannelRoutingSetting{
+			WindowMinutes:        test.window,
+			ProbeIntervalSeconds: test.interval,
+		}
+		assert.Equal(t, test.want, setting.ProbeWindowCapacity(),
+			"window=%dm interval=%ds", test.window, test.interval)
+	}
+
+	assert.Zero(t, AdaptiveChannelRoutingSetting{WindowMinutes: 0, ProbeIntervalSeconds: 60}.ProbeWindowCapacity())
+	assert.Zero(t, AdaptiveChannelRoutingSetting{WindowMinutes: 60, ProbeIntervalSeconds: 0}.ProbeWindowCapacity())
+}
