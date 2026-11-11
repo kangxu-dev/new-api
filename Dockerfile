@@ -49,7 +49,18 @@ ARG HTTPS_PROXY
 ARG NO_PROXY
 ENV HTTP_PROXY=${HTTP_PROXY} HTTPS_PROXY=${HTTPS_PROXY} NO_PROXY=${NO_PROXY}
 
-RUN apt-get update \
+# This stage's first job is installing a trust store, so apt cannot verify an
+# https mirror until ca-certificates exists — the classic bootstrap problem.
+# Borrow the bundle the Go builder stage already carries, which lets the mirror
+# below be https and removes any need for a build-time proxy on networks that
+# block outbound port 80. When ca-certificates is installed it overwrites this
+# file and update-ca-certificates regenerates it, so the copy is harmless on
+# networks where plain http would also have worked.
+COPY --from=builder2 /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+
+ARG DEBIAN_APT_SOURCE=https://deb.debian.org
+RUN sed -i "s|http://deb.debian.org|${DEBIAN_APT_SOURCE}|g" /etc/apt/sources.list.d/debian.sources \
+    && apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates tzdata libasan8 wget \
     && rm -rf /var/lib/apt/lists/* \
     && update-ca-certificates
